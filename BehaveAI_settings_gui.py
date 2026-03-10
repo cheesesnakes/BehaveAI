@@ -783,7 +783,7 @@ class SettingsEditorApp(tk.Tk):
 		self.expA_var.set(float(d.get('expA', fallback='0.5')))
 		self.expB_var.set(float(d.get('expB', fallback='0.7')))
 		self.lum_weight_var.set(float(d.get('lum_weight', fallback='0.5')))
-		self.rgb_mult_var.set(d.get('rgb_multipliers', fallback='2,2,2'))
+		self.rgb_mult_var.set(d.get('rgb_multipliers', fallback='4,4,4'))
 		self.frame_skip_var.set(int(d.get('frame_skip', fallback='0')))
 		# ~ self.scale_factor_var.set(float(d.get('scale_factor', fallback='1.0')))
 
@@ -794,7 +794,7 @@ class SettingsEditorApp(tk.Tk):
 			'expA': str(d.get('expA', fallback='0.5')),
 			'expB': str(d.get('expB', fallback='0.7')),
 			'lum_weight': str(d.get('lum_weight', fallback='0.5')),
-			'rgb_multipliers': str(d.get('rgb_multipliers', fallback='2,2,2')).replace(' ', ''),
+			'rgb_multipliers': str(d.get('rgb_multipliers', fallback='4,4,4')).replace(' ', ''),
 			'frame_skip': str(d.get('frame_skip', fallback='0')),
 			'motion_blocks_static': str(d.get('motion_blocks_static', fallback='false')).lower(),
 			'static_blocks_motion': str(d.get('static_blocks_motion', fallback='false')).lower(),

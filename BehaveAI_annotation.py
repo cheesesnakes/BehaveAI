@@ -961,7 +961,8 @@ class AnnotatorTk:
 		root.bind_all('<Return>', lambda e: self.key_save())
 
 		# drawing/display state
-		self.display_size = (video_width, video_height)
+		# ~ self.display_size = (video_width, video_height)
+		self.display_size = (min(800, video_width), min(600, video_height))
 		self.tk_img = None
 		self.last_mouse = None
 		self.drawing = False
@@ -1404,20 +1405,59 @@ class AnnotatorTk:
 		crop_vid = max(2, int(round(widget_size * display_scale / MAG)))
 		crop_vid_anim = max(2, int(round(widget_size * display_scale / MAG_ANIM)))
 	
+		# prevent absurdly large crop sizes (memory blowouts).
+		MAX_ZOOM_CROP = 2048
+		crop_vid = min(crop_vid, MAX_ZOOM_CROP)
+		crop_vid_anim = min(crop_vid_anim, MAX_ZOOM_CROP)
+	
+		# ~ def padded_crop(src, cx, cy, crop_size):
+			# ~ h, w = src.shape[:2]
+			# ~ x1 = cx - crop_size // 2
+			# ~ y1 = cy - crop_size // 2
+			# ~ x2 = x1 + crop_size
+			# ~ y2 = y1 + crop_size
+			# ~ sx1 = max(0, x1); sy1 = max(0, y1)
+			# ~ sx2 = min(w, x2); sy2 = min(h, y2)
+			# ~ out = np.zeros((crop_size, crop_size, 3), dtype=np.uint8)
+			# ~ if sx2 > sx1 and sy2 > sy1:
+				# ~ dst_x1 = sx1 - x1
+				# ~ dst_y1 = sy1 - y1
+				# ~ dst_x2 = dst_x1 + (sx2 - sx1)
+				# ~ dst_y2 = dst_y1 + (sy2 - sy1)
+				# ~ out[dst_y1:dst_y2, dst_x1:dst_x2] = src[sy1:sy2, sx1:sx2]
+			# ~ return out, (x1, y1, x2, y2)
+
 		def padded_crop(src, cx, cy, crop_size):
 			h, w = src.shape[:2]
+
+			# Defensive clamp in case upstream computed a large crop_size.
+			MAX_PADDDED_CROP = 2048
+			use_crop = int(min(crop_size, MAX_PADDDED_CROP))
+
 			x1 = cx - crop_size // 2
 			y1 = cy - crop_size // 2
 			x2 = x1 + crop_size
 			y2 = y1 + crop_size
 			sx1 = max(0, x1); sy1 = max(0, y1)
 			sx2 = min(w, x2); sy2 = min(h, y2)
-			out = np.zeros((crop_size, crop_size, 3), dtype=np.uint8)
+
+			# create output at the clamped size but still compute box using original crop coords
+			out = np.zeros((use_crop, use_crop, 3), dtype=np.uint8)
 			if sx2 > sx1 and sy2 > sy1:
+				# destination offsets must respect the difference between original and clamped size
+				# compute offsets relative to the clamped output
 				dst_x1 = sx1 - x1
 				dst_y1 = sy1 - y1
 				dst_x2 = dst_x1 + (sx2 - sx1)
 				dst_y2 = dst_y1 + (sy2 - sy1)
+
+				# If we clamped use_crop < crop_size, we may need to shift the destination region
+				# ensure indices fit inside out array
+				dst_x1 = max(0, dst_x1)
+				dst_y1 = max(0, dst_y1)
+				dst_x2 = min(use_crop, dst_x2)
+				dst_y2 = min(use_crop, dst_y2)
+
 				out[dst_y1:dst_y2, dst_x1:dst_x2] = src[sy1:sy2, sx1:sx2]
 			return out, (x1, y1, x2, y2)
 	
