@@ -120,7 +120,7 @@ def move_to_expected(project_path, run_name="train", runs_root="runs"):
 
     # Search broadly for best.pt files, excluding the project_path itself
     # (in case of a partial previous move) and any *_backup dirs.
-    search_roots = [runs_root, "."]
+    search_roots = [runs_root, "../../runs", "."]
     candidates = []
     for root in search_roots:
         if not os.path.isdir(root):
@@ -137,10 +137,10 @@ def move_to_expected(project_path, run_name="train", runs_root="runs"):
             candidates.append(abs_path)
 
     if not candidates:
-        print(
-            f"Warning: move_to_expected could not find any best.pt to relocate for '{project_path}'"
+        # raise exception
+        raise FileNotFoundError(
+            f"Could not find 'best.pt' after training. Searched in '{search_roots}' and current directory, excluding '{project_path}' and backups."
         )
-        return None
 
     # Most recently modified wins
     candidates.sort(key=os.path.getmtime, reverse=True)
@@ -588,7 +588,11 @@ def maybe_retrain(
                     name="train",
                     exist_ok=True,
                 )
-                move_to_expected(project_path, run_name="train", runs_root="runs")
+                try:
+                    move_to_expected(project_path, run_name="train", runs_root="runs")
+                except Exception as e:
+                    print(f"Error: {e}")
+
                 print(f"Done training {model_type} model")
                 # Update saved train count
                 with open(os.path.join(project_path, "train_count.txt"), "w") as f:
@@ -610,6 +614,13 @@ def maybe_retrain(
     else:
         # Model missing -> do first-time training
         print(f"{model_type} model not found, building it...")
+        current_count = count_images_in_dataset(yaml_path)
+        if current_count < 2:
+            print(
+                f"Error: Not enough images to train {model_type} model (found {current_count}, need at least 2)."
+            )
+            return False
+
         model = YOLO(classifier)
         model.train(
             data=yaml_path,
@@ -619,7 +630,11 @@ def maybe_retrain(
             name="train",
             exist_ok=True,
         )
-        move_to_expected(project_path, run_name="train", runs_root="runs")
+        try:
+            move_to_expected(project_path, run_name="train", runs_root="runs")
+        except Exception as e:
+            print(f"Error: {e}")
+
         print(f"Done training {model_type} model")
 
         current_count = count_images_in_dataset(yaml_path)
@@ -668,6 +683,14 @@ if hierarchical_mode:
             model_dir = f"model_static_static_{primary_class}"
             weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
 
+            n_image = count_images_in_dataset(data_dir)
+
+            if n_image < 2:
+                print(
+                    f"Error: Not enough images to train secondary motion model for primary class '{primary_class}' (found {n_image}, need at least 2). Skipping this secondary model."
+                )
+                continue
+
             maybe_retrain(
                 model_dir,
                 data_dir,
@@ -710,6 +733,14 @@ if hierarchical_mode:
             # Create model directory for this static class
             model_dir = f"model_secondary_motion_{primary_class}"
             weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
+
+            n_image = count_images_in_dataset(data_dir)
+
+            if n_image < 2:
+                print(
+                    f"Error: Not enough images to train secondary motion model for primary class '{primary_class}' (found {n_image}, need at least 2). Skipping this secondary model."
+                )
+                continue
 
             maybe_retrain(
                 model_dir,
