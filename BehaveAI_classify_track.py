@@ -1,20 +1,19 @@
-import cv2
-import numpy as np
-import csv
-import os
-import glob
-from ultralytics import YOLO
-from scipy.optimize import linear_sum_assignment
 import configparser
-import time
+import csv
+import glob
+import os
 import shutil
-import tkinter as tk
-from tkinter import messagebox, filedialog
-import subprocess
 
 # ~ import config_watcher
 import sys
+import time
+import tkinter as tk
+from tkinter import filedialog, messagebox
 
+import cv2
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+from ultralytics import YOLO
 
 # --- NCNN helper utilities -----------------------
 
@@ -450,14 +449,14 @@ if (
 if len(primary_static_classes) > 0:
     if not os.path.exists(primary_static_yaml_path):
         print(
-            f"Error: Primary static YAML file not found. Run the Annotation script once to fix this"
+            "Error: Primary static YAML file not found. Run the Annotation script once to fix this"
         )
         sys.exit(1)
 
 if len(primary_motion_classes) > 0:
     if not os.path.exists(primary_motion_yaml_path):
         print(
-            f"Error: Primary motion YAML file not found. Run the Annotation script once to fix this"
+            "Error: Primary motion YAML file not found. Run the Annotation script once to fix this"
         )
         sys.exit(1)
 
@@ -537,13 +536,6 @@ def maybe_retrain(
     - If model_path does not exist, perform first-time training.
     Returns True if a training run was performed, False otherwise.
     """
-
-    # Determine whether this is a motion model by naming
-    is_motion_model = (
-        ("motion" in model_type.lower())
-        or ("secondary_motion" in project_path.lower())
-        or ("primary_motion" in project_path.lower())
-    )
 
     # If model exists: compare recorded image count (train_count.txt) with current dataset
     if os.path.exists(model_path):
@@ -1262,19 +1254,16 @@ def process_video(file):
 
                     # Determine which secondary model to use based on source and configuration
                     sec_model = None
-                    sec_classes = []
                     crop_img = None
 
                     if source == "static":
                         # Use static secondary model if configured
                         if len(secondary_static_classes) >= 2:
                             sec_model = secondary_static_models.get(primary_class, None)
-                            sec_classes = secondary_static_classes
                             crop_img = frame
                         # Fallback to motion secondary model if static not available
                         elif len(secondary_motion_classes) >= 2:
                             sec_model = secondary_motion_models.get(primary_class, None)
-                            sec_classes = secondary_motion_classes
                             crop_img = (
                                 motion_image
                                 if primary_motion_classes[0] != "0"
@@ -1284,12 +1273,10 @@ def process_video(file):
                         # Use motion secondary model if configured
                         if len(secondary_motion_classes) >= 2:
                             sec_model = secondary_motion_models.get(primary_class, None)
-                            sec_classes = secondary_motion_classes
                             crop_img = motion_image
                         # Fallback to static secondary model if motion not available
                         elif len(secondary_static_classes) >= 2:
                             sec_model = secondary_static_models.get(primary_class, None)
-                            sec_classes = secondary_static_classes
                             crop_img = frame
 
                     # Get the cropped region

@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 
 
+import configparser
 import os
+import random
 import sys
 import time
+import tkinter as tk
+from collections import deque
+from tkinter import filedialog, messagebox, ttk
+
 import cv2
 import numpy as np
-import configparser
-import random
-from collections import deque
-
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
-from index_annotations import AnnotationIndex
 
+from index_annotations import AnnotationIndex
 
 # Try to import YOLO
 try:
@@ -565,7 +565,7 @@ def auto_annotate_local():
     global boxes
 
     # Primary static detection
-    if primary_static_classes[0] != "0" and model_static != None:
+    if primary_static_classes[0] != "0" and model_static is not None:
         results_static = model_static.predict(
             fr, conf=primary_conf_thresh, verbose=False
         )
@@ -580,12 +580,10 @@ def auto_annotate_local():
                 # crop and run secondary classifier on static image
                 if len(secondary_static_classes) >= 2:
                     sec_model = secondary_static_models.get(primary_class, None)
-                    sec_classes = secondary_static_classes
                     crop_img = fr
                 # Fallback to motion secondary model if static not available
                 elif len(secondary_motion_classes) >= 2:
                     sec_model = secondary_motion_models.get(primary_class, None)
-                    sec_classes = secondary_motion_classes
                     crop_img = motion_image if primary_motion_classes[0] != "0" else fr
 
                 # Get the cropped region
@@ -593,7 +591,6 @@ def auto_annotate_local():
                 if crop_img is not None:
                     crop = crop_img[y1:y2, x1:x2]
 
-                secondary_class = primary_class
                 secondary_conf = 1.0
                 secondary_class_idx = -1
 
@@ -603,7 +600,6 @@ def auto_annotate_local():
                     if sec_results[0].probs is not None:
                         secondary_class_idx = sec_results[0].probs.top1
                         secondary_conf = sec_results[0].probs.top1conf.item()
-                        secondary_class = sec_model.names[secondary_class_idx]
 
                 boxes.append(
                     (
@@ -622,7 +618,7 @@ def auto_annotate_local():
                 boxes.append((x1, y1, x2, y2, class_idx, conf))
 
     # Primary motion detection
-    if primary_motion_classes[0] != "0" and model_motion != None:
+    if primary_motion_classes[0] != "0" and model_motion is not None:
         results_motion = model_motion.predict(
             motion_image, conf=primary_conf_thresh, verbose=False
         )
@@ -641,12 +637,10 @@ def auto_annotate_local():
                     # crop and run secondary classifier on static image
                     if len(secondary_static_classes) >= 2:
                         sec_model = secondary_static_models.get(primary_class, None)
-                        sec_classes = secondary_static_classes
                         crop_img = fr
                     # Fallback to motion secondary model if static not available
                     elif len(secondary_motion_classes) >= 2:
                         sec_model = secondary_motion_models.get(primary_class, None)
-                        sec_classes = secondary_motion_classes
                         crop_img = (
                             motion_image if primary_motion_classes[0] != "0" else fr
                         )
@@ -656,7 +650,6 @@ def auto_annotate_local():
                     if crop_img is not None:
                         crop = crop_img[y1:y2, x1:x2]
 
-                    secondary_class = primary_class
                     secondary_conf = 1.0
                     secondary_class_idx = -1
 
@@ -666,7 +659,6 @@ def auto_annotate_local():
                         if sec_results[0].probs is not None:
                             secondary_class_idx = sec_results[0].probs.top1
                             secondary_conf = sec_results[0].probs.top1conf.item()
-                            secondary_class = sec_model.names[secondary_class_idx]
 
                     boxes.append(
                         (
@@ -1324,8 +1316,8 @@ class AnnotatorTk:
         Top-left anchored (composite drawn at 0,0).
         """
         cx, cy = canvas_point
-        c_w = self.canvas.winfo_width() or 1
-        c_h = self.canvas.winfo_height() or 1
+        # c_w = self.canvas.winfo_width() or 1
+        # c_h = self.canvas.winfo_height() or 1
 
         # fallback values if redraw hasn't set them yet
         disp_w, disp_h = getattr(self, "display_size", (video_width, video_height))
@@ -1531,7 +1523,7 @@ class AnnotatorTk:
                 boxes.clear()
                 grey_boxes.clear()
                 print(f"All files for frame {frame_number} have been deleted")
-                frame_updated = True
+                # frame_updated = True
                 try:
                     # refresh index and redraw ticks immediately
                     self.refresh_annotation_index_map()
