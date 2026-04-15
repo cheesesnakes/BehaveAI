@@ -1038,6 +1038,12 @@ class AnnotatorTk:
         self.main = tk.Frame(root)
         self.main.pack(fill="both", expand=True)
 
+        # video state
+        self.playing = False
+        self.play_after_id = None
+        video_fps = capture.get(cv2.CAP_PROP_FPS)
+        self.frame_delay = int(1000 / video_fps) if video_fps > 0 else 33
+
         # left container which holds the single composite canvas
         self.left = tk.Frame(self.main)
         self.left.pack(side="left", fill="both", expand=True)
@@ -1062,6 +1068,12 @@ class AnnotatorTk:
             self.controls, text="Grey (g)", width=10, command=self.toggle_grey
         )
         self.grey_btn.pack(side="left", padx=4)
+
+        # play/pause toggle
+        self.play_btn = tk.Button(
+            self.controls, text="Play (p)", width=10, command=self.toggle_play
+        )
+        self.play_btn.pack(side="left", padx=4)
 
         # frame number label (shows current frame number)
         self.frame_var = tk.StringVar(value=str(frame_number))
@@ -1348,6 +1360,28 @@ class AnnotatorTk:
         cy = int(round((vy * disp_h / float(video_height))))
         return (cx, cy)
 
+    # Play/pause toggle
+
+    def toggle_play(self):
+        if self.playing:
+            self.stop_play()
+        else:
+            self.start_play()
+
+    def start_play(self):
+        self.playing = True
+        self.play_btn.config(text="Pause (p)", relief="sunken")
+
+    def stop_play(self):
+        self.playing = False
+        self.play_btn.config(text="Play (p)", relief="raised")
+        if self.play_after_id is not None:
+            try:
+                self.root.after_cancel(self.play_after_id)
+            except Exception:
+                pass
+            self.play_after_id = None
+
     # drawing handlers
     def on_mouse_down(self, event):
         self.drawing = True
@@ -1486,7 +1520,9 @@ class AnnotatorTk:
         if ch == "g":
             self.toggle_grey()
             return
-
+        if ch == "p":
+            self.toggle_play()
+            return
         if ks == "Return":
             save_annotation()
             boxes.clear()
@@ -1549,6 +1585,14 @@ class AnnotatorTk:
             return "break"
 
     def key_step(self, delta):
+        global frame_number, frame_updated
+        if getattr(self, "playing", False):
+            self.stop_play()
+        frame_number = min(max(0, frame_number + delta), total_frames - 1)
+        frame_updated = True
+        self.seek.set(frame_number)
+
+    def _play_step(self, delta):
         global frame_number, frame_updated
         frame_number = min(max(0, frame_number + delta), total_frames - 1)
         frame_updated = True
@@ -2000,7 +2044,12 @@ class AnnotatorTk:
         if need_:
             self.redraw()
 
-        self.root.after(30, self.loop)
+        if self.playing:
+            # if playing, we want to update as fast as possible (not just on frame changes) to keep the display smooth
+            self._play_step(+1)
+            self.root.after(1, self.loop)
+        else:
+            self.root.after(30, self.loop)
 
 
 # Launch app
