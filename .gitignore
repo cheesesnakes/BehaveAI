@@ -2,3 +2,5 @@ projects/
 runs/
 __pycache__/
 .vscode/
+*.csv
+clips*/
