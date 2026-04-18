@@ -405,7 +405,7 @@ def train_models():
                     continue
 
                 # Create model directory for this static class
-                model_dir = f"model_static_static_{primary_class}"
+                model_dir = f"models/model_static_static_{primary_class}"
                 weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
 
                 n_image = count_images_in_dataset(data_dir)
@@ -461,7 +461,7 @@ def train_models():
                     continue
 
                 # Create model directory for this static class
-                model_dir = f"model_secondary_motion_{primary_class}"
+                model_dir = f"models/model_secondary_motion_{primary_class}"
                 weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
 
                 n_image = count_images_in_dataset(data_dir)
@@ -496,7 +496,7 @@ def train_models():
     # -------CHECK PRIMARY MODEL EXISTS----------
     if params["primary_static_classes"][0] != "0":
         maybe_retrain(
-            "primary static",
+            "models/model_primary_static",
             params["primary_static_yaml_path"],
             params["primary_static_project_path"],
             params["primary_static_model_path"],
@@ -507,7 +507,7 @@ def train_models():
 
     if params["primary_motion_classes"][0] != "0":
         maybe_retrain(
-            "primary motion",
+            "models/model_primary_motion",
             params["primary_motion_yaml_path"],
             params["primary_motion_project_path"],
             params["primary_motion_model_path"],
