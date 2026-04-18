@@ -195,13 +195,31 @@ def read_parameters():
             for key in config["DEFAULT"]["secondary_static_hotkeys"].split(",")
         ]
 
+        params["static_train_images_dir"] = (
+            f"{ANNOTATION_FOLDER}/annot_static/images/train"
+        )
+        params["static_val_images_dir"] = f"{ANNOTATION_FOLDER}/annot_static/images/val"
+        params["static_train_labels_dir"] = (
+            f"{ANNOTATION_FOLDER}/annot_static/labels/train"
+        )
+        params["static_val_labels_dir"] = f"{ANNOTATION_FOLDER}/annot_static/labels/val"
+
+        params["motion_train_images_dir"] = (
+            f"{ANNOTATION_FOLDER}/annot_motion/images/train"
+        )
+        params["motion_val_images_dir"] = f"{ANNOTATION_FOLDER}/annot_motion/images/val"
+        params["motion_train_labels_dir"] = (
+            f"{ANNOTATION_FOLDER}/annot_motion/labels/train"
+        )
+        params["motion_val_labels_dir"] = f"{ANNOTATION_FOLDER}/annot_motion/labels/val"
+
         if (
             len(params["secondary_motion_classes"]) >= 2
             or len(params["secondary_static_classes"]) >= 2
         ):
             params["hierarchical_mode"] = True
-            params["motion_cropped_base_dir"] = "annot_motion_crop"
-            params["static_cropped_base_dir"] = "annot_static_crop"
+            params["motion_cropped_base_dir"] = f"{ANNOTATION_FOLDER}/annot_motion_crop"
+            params["static_cropped_base_dir"] = f"{ANNOTATION_FOLDER}/annot_static_crop"
 
             # secondary classes need more than one value, so clear if there's only one value
             if len(params["secondary_motion_classes"]) == 1:
@@ -237,17 +255,21 @@ def read_parameters():
             params["secondary_static_hotkeys"] + params["secondary_motion_hotkeys"]
         )
 
-        params["primary_static_project_path"] = "model_primary_static"
+        params["primary_static_project_path"] = f"{MODEL_FOLDER}/model_primary_static"
         params["primary_static_model_path"] = os.path.join(
-            "model_primary_static", "train", "weights", "best.pt"
+            f"{MODEL_FOLDER}/model_primary_static", "train", "weights", "best.pt"
         )
-        params["primary_static_yaml_path"] = "static_annotations.yaml"
+        params["primary_static_yaml_path"] = (
+            f"{ANNOTATION_FOLDER}/static_annotations.yaml"
+        )
 
-        params["primary_motion_project_path"] = "model_primary_motion"
+        params["primary_motion_project_path"] = f"{MODEL_FOLDER}/model_primary_motion"
         params["primary_motion_model_path"] = os.path.join(
-            "model_primary_motion", "train", "weights", "best.pt"
+            f"{MODEL_FOLDER}/model_primary_motion", "train", "weights", "best.pt"
         )
-        params["primary_motion_yaml_path"] = "motion_annotations.yaml"
+        params["primary_motion_yaml_path"] = (
+            f"{ANNOTATION_FOLDER}/motion_annotations.yaml"
+        )
 
         params["ignore_secondary"] = [
             name.strip() for name in config["DEFAULT"]["ignore_secondary"].split(",")
@@ -266,16 +288,24 @@ def read_parameters():
         )
 
         if params["hierarchical_mode"]:
-            params["secondary_static_project_path"] = "model_secondary_static"
-            params["secondary_static_data_path"] = "annot_static_crop"
+            params["secondary_static_project_path"] = (
+                f"{MODEL_FOLDER}/model_secondary_static"
+            )
+            params["secondary_static_data_path"] = (
+                f"{ANNOTATION_FOLDER}/annot_static_crop"
+            )
             params["secondary_static_model_path"] = os.path.join(
-                "model_secondary_static", "train", "weights", "best.pt"
+                f"{MODEL_FOLDER}/model_secondary_static", "train", "weights", "best.pt"
             )
 
-            params["secondary_motion_project_path"] = "model_secondary_motion"
-            params["secondary_motion_data_path"] = "annot_motion_crop"
+            params["secondary_motion_project_path"] = (
+                f"{MODEL_FOLDER}/model_secondary_motion"
+            )
+            params["secondary_motion_data_path"] = (
+                f"{ANNOTATION_FOLDER}/annot_motion_crop"
+            )
             params["secondary_motion_model_path"] = os.path.join(
-                "model_secondary_motion", "train", "weights", "best.pt"
+                f"{MODEL_FOLDER}/model_secondary_motion", "train", "weights", "best.pt"
             )
 
             params["secondary_class_ids"] = list(
@@ -332,6 +362,13 @@ def read_parameters():
         params["line_thickness"] = int(config["DEFAULT"].get("line_thickness", "1"))
         params["font_size"] = float(config["DEFAULT"].get("font_size", "0.5"))
         params["frame_skip"] = int(config["DEFAULT"].get("frame_skip", "0"))
+        params["motion_blocks_static"] = config["DEFAULT"][
+            "motion_blocks_static"
+        ].lower()
+        params["static_blocks_motion"] = config["DEFAULT"][
+            "static_blocks_motion"
+        ].lower()
+        params["save_empty_frames"] = config["DEFAULT"]["save_empty_frames"].lower()
 
         params["process_noise_pos"] = float(
             config["kalman"].get("process_noise_pos", "0.01")
@@ -405,7 +442,12 @@ def validate_configuration(params):
                 "Error: Primary motion YAML file not found. Run the Annotation script once to fix this"
             )
             sys.exit(1)
-
+    if params["motion_blocks_static"] not in ("true", "false"):
+        raise ValueError("motion_blocks_static must be 'true' or 'false'")
+    if params["static_blocks_motion"] not in ("true", "false"):
+        raise ValueError("static_blocks_motion must be 'true' or 'false'")
+    if params["save_empty_frames"] not in ("true", "false"):
+        raise ValueError("save_empty_frames must be 'true' or 'false'")
     return True
 
 
