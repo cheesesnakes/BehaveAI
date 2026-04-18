@@ -11,9 +11,8 @@ from tkinter import filedialog, ttk
 
 import cv2
 import numpy as np
+from index_annotations import AnnotationIndex
 from PIL import Image, ImageTk
-
-from scripts.index_annotations import AnnotationIndex
 
 # Try to import YOLO
 try:
@@ -23,7 +22,7 @@ except Exception:
 
 
 # --- Load parameters from config ---
-from scripts.load_configs import load_params
+from load_configs import load_params
 
 params = load_params()
 

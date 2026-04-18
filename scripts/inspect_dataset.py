@@ -9,9 +9,8 @@ from tkinter import ttk
 
 import cv2
 import numpy as np
+from index_annotations import AnnotationIndex
 from PIL import Image, ImageTk
-
-from scripts.index_annotations import AnnotationIndex
 
 # Optional YOLO import
 try:

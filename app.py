@@ -149,11 +149,11 @@ class ScriptRunnerApp:
         # action buttons (initially disabled: enable after project selection)
         self.buttons = {}
         btn_names = [
-            ("Settings", "settings_gui.py"),
-            ("Annotate", "annotation.py"),
-            ("Inspect Dataset", "inspect_dataset.py"),
-            ("Train & batch classify", "classify_track.py"),
-            ("Live", "live.py"),
+            ("Settings", "scripts/settings_gui.py"),
+            ("Annotate", "scripts/annotation.py"),
+            ("Inspect Dataset", "scripts/inspect_dataset.py"),
+            ("Train & batch classify", "scripts/classify_track.py"),
+            ("Live", "scripts/live.py"),
         ]
         for label_text, script_name in btn_names:
             b = Button(
@@ -238,7 +238,7 @@ class ScriptRunnerApp:
             return
 
         # Settings button should always be enabled for a selected project
-        settings_script = "settings_gui.py"
+        settings_script = "scripts/settings_gui.py"
         for script_name, btn in self.buttons.items():
             if script_name == settings_script:
                 btn.config(state="normal")

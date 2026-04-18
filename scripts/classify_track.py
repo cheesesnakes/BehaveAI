@@ -11,10 +11,9 @@ from tkinter import messagebox
 
 import cv2
 import numpy as np
+from load_configs import load_params
 from scipy.optimize import linear_sum_assignment
 from ultralytics import YOLO
-
-from scripts.load_configs import load_params
 
 params = load_params()
 
