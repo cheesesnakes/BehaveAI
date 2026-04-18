@@ -67,6 +67,8 @@ os.chdir(project_dir)
 config = configparser.ConfigParser()
 config.optionxform = str
 config.read(config_path)
+ANNOTATION_FOLDER = f"{project_dir}/annotations"
+MODEL_FOLDER = f"{project_dir}/models"
 
 
 def resolve_project_path(value, fallback):
@@ -138,25 +140,25 @@ try:
         key.strip() for key in config["DEFAULT"]["secondary_static_hotkeys"].split(",")
     ]
 
-    primary_static_project_path = "model_primary_static"
+    primary_static_project_path = f"{MODEL_FOLDER}/model_primary_static"
     primary_static_model_path = os.path.join(
         "model_primary_static", "train", "weights", "best.pt"
     )
-    primary_static_yaml_path = "static_annotations.yaml"
+    primary_static_yaml_path = f"{ANNOTATION_FOLDER}/static_annotations.yaml"
 
-    primary_motion_project_path = "model_primary_motion"
+    primary_motion_project_path = f"{MODEL_FOLDER}/model_primary_motion"
     primary_motion_model_path = os.path.join(
         "model_primary_motion", "train", "weights", "best.pt"
     )
-    primary_motion_yaml_path = "motion_annotations.yaml"
+    primary_motion_yaml_path = f"{MODEL_FOLDER}/motion_annotations.yaml"
 
     ignore_secondary = [
         name.strip() for name in config["DEFAULT"]["ignore_secondary"].split(",")
     ]
     dominant_source = config["DEFAULT"]["dominant_source"].lower()
 
-    motion_cropped_base_dir = "annot_motion_crop"
-    static_cropped_base_dir = "annot_static_crop"
+    motion_cropped_base_dir = f"{ANNOTATION_FOLDER}/annot_motion_crop"
+    static_cropped_base_dir = f"{ANNOTATION_FOLDER}/annot_static_crop"
 
     if len(secondary_motion_classes) >= 2 or len(secondary_static_classes) >= 2:
         hierarchical_mode = True
@@ -184,16 +186,16 @@ try:
     secondary_hotkeys = secondary_static_hotkeys + secondary_motion_hotkeys
 
     if hierarchical_mode:
-        secondary_static_project_path = "model_secondary_static"
-        secondary_static_data_path = "annot_static_crop"
+        secondary_static_project_path = f"{MODEL_FOLDER}/model_secondary_static"
+        secondary_static_data_path = f"{ANNOTATION_FOLDER}/annot_static_crop"
         secondary_static_model_path = os.path.join(
-            "model_secondary_static", "train", "weights", "best.pt"
+            f"{ANNOTATION_FOLDER}/model_secondary_static", "train", "weights", "best.pt"
         )
 
-        secondary_motion_project_path = "model_secondary_motion"
-        secondary_motion_data_path = "annot_motion_crop"
+        secondary_motion_project_path = f"{MODEL_FOLDER}/model_secondary_motion"
+        secondary_motion_data_path = f"{ANNOTATION_FOLDER}/annot_motion_crop"
         secondary_motion_model_path = os.path.join(
-            "model_secondary_motion", "train", "weights", "best.pt"
+            f"{ANNOTATION_FOLDER}/model_secondary_motion", "train", "weights", "best.pt"
         )
 
         secondary_class_ids = list(range(len(secondary_classes)))
@@ -215,15 +217,15 @@ try:
         secondary_class_ids = list(secondary_class_ids)
         secondary_hotkeys = list(secondary_hotkeys)
 
-    static_train_images_dir = "annot_static/images/train"
-    static_val_images_dir = "annot_static/images/val"
-    static_train_labels_dir = "annot_static/labels/train"
-    static_val_labels_dir = "annot_static/labels/val"
+    static_train_images_dir = f"{ANNOTATION_FOLDER}/annot_static/images/train"
+    static_val_images_dir = f"{ANNOTATION_FOLDER}/annot_static/images/val"
+    static_train_labels_dir = f"{ANNOTATION_FOLDER}/annot_static/labels/train"
+    static_val_labels_dir = f"{ANNOTATION_FOLDER}/annot_static/labels/val"
 
-    motion_train_images_dir = "annot_motion/images/train"
-    motion_val_images_dir = "annot_motion/images/val"
-    motion_train_labels_dir = "annot_motion/labels/train"
-    motion_val_labels_dir = "annot_motion/labels/val"
+    motion_train_images_dir = f"{ANNOTATION_FOLDER}/annot_motion/images/train"
+    motion_val_images_dir = f"{ANNOTATION_FOLDER}/annot_motion/images/val"
+    motion_train_labels_dir = f"{ANNOTATION_FOLDER}/annot_motion/labels/train"
+    motion_val_labels_dir = f"{ANNOTATION_FOLDER}/annot_motion/labels/val"
 
     # Common parameters
     scale_factor = float(config["DEFAULT"].get("scale_factor", "1.0"))
