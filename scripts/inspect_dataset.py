@@ -1,18 +1,17 @@
-
 #!/usr/bin/env python3
 
 import os
 import sys
 import time
 import tkinter as tk
-from tkinter import ttk
 from collections import deque
+from tkinter import ttk
 
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-from index_annotations import AnnotationIndex
+from scripts.index_annotations import AnnotationIndex
 
 # Optional YOLO import
 try:

@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-from index_annotations import AnnotationIndex
+from scripts.index_annotations import AnnotationIndex
 
 # Try to import YOLO
 try:
@@ -23,7 +23,7 @@ except Exception:
 
 
 # --- Load parameters from config ---
-from load_configs import load_params
+from scripts.load_configs import load_params
 
 params = load_params()
 

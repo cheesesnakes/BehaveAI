@@ -1340,7 +1340,7 @@ class SettingsEditorApp(tk.Tk):
           3) current working directory
         """
 
-        script_name = "Regenerate_annotations.py"
+        script_name = "regenerate_annotations.py"
         launcher_dir = Path(__file__).resolve().parent
         script_path = launcher_dir / script_name
 
@@ -1581,10 +1581,7 @@ class SettingsEditorApp(tk.Tk):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print(
-            "Usage: python BehaveAI_settings_gui.py "
-            "<project_dir | BehaveAI_settings.ini>"
-        )
+        print("Usage: python settings_gui.py <project_dir | BehaveAI_settings.ini>")
         sys.exit(1)
 
     arg = os.path.abspath(sys.argv[1])

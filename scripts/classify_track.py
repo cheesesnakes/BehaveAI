@@ -14,7 +14,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 from ultralytics import YOLO
 
-from load_configs import load_params
+from scripts.load_configs import load_params
 
 params = load_params()
 
