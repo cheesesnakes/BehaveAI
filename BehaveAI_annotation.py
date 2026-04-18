@@ -23,7 +23,9 @@ except Exception:
 
 
 # --- Load parameters from config ---
-from load_configs import params
+from load_configs import load_params
+
+params = load_params()
 
 # Unpack all needed params
 primary_static_classes = params["primary_static_classes"]

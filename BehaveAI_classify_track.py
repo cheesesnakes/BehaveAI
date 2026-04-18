@@ -13,7 +13,9 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 from ultralytics import YOLO
 
-from load_configs import params
+from load_configs import load_params
+
+params = load_params()
 
 # --- NCNN helper utilities -----------------------
 

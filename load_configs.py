@@ -111,6 +111,9 @@ def setup_directories():
     ANNOTATION_FOLDER = os.path.join(project_dir, "annotations")
     MODEL_FOLDER = os.path.join(project_dir, "models")
 
+    os.makedirs(ANNOTATION_FOLDER, exist_ok=True)
+    os.makedirs(MODEL_FOLDER, exist_ok=True)
+
     return 0
 
 
@@ -454,15 +457,10 @@ def validate_configuration(params):
 # main function to load configs and return params dict
 
 
-def main():
+def load_params():
     setup_directories()
     params = read_parameters()
     if not validate_configuration(params):
         print("Configuration validation failed. Please check your settings.")
         sys.exit(1)
     return params
-
-
-if __name__ == "__main__":
-    params = main()
-    print("Configuration loaded successfully:")

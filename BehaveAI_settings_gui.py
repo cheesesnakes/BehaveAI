@@ -17,6 +17,8 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 import yaml
 
 INI_DEFAULT_PATH = os.path.join(os.getcwd(), "BehaveAI_settings.ini")
+DEFAULT_ANNOTATIONS_FOLDER = "annotations"
+DEFAULT_MODELS_FOLDER = "models"
 
 CLASS_GROUPS = [
     ("primary_motion", "Primary motion"),
@@ -563,8 +565,12 @@ class SettingsEditorApp(tk.Tk):
         Return True to allow structural changes (add/remove/clear), False to block.
         Show warning if annot_motion or annot_static exist in the project dir.
         """
-        annot_motion = os.path.join(self.project_dir, "annot_motion")
-        annot_static = os.path.join(self.project_dir, "annot_static")
+        annot_motion = os.path.join(
+            self.project_dir, DEFAULT_ANNOTATIONS_FOLDER, "annot_motion"
+        )
+        annot_static = os.path.join(
+            self.project_dir, DEFAULT_ANNOTATIONS_FOLDER, "annot_static"
+        )
         if os.path.isdir(annot_motion) or os.path.isdir(annot_static):
             msg = (
                 "Detected existing annotation directories in project:\n\n"
@@ -1132,32 +1138,33 @@ class SettingsEditorApp(tk.Tk):
         Write static_annotations.yaml and motion_annotations.yaml into the project (settings) directory.
         Create the expected annot_static/annot_motion directories if they don't exist.
         """
+        annotations_dir = os.path.join(self.project_dir, DEFAULT_ANNOTATIONS_FOLDER)
         try:
             # directories relative to the project_dir (which is dirname(ini_path))
             static_train_images_dir = os.path.join(
-                self.project_dir, "annot_static", "images", "train"
+                annotations_dir, "annot_static", "images", "train"
             )
             static_val_images_dir = os.path.join(
-                self.project_dir, "annot_static", "images", "val"
+                annotations_dir, "annot_static", "images", "val"
             )
             static_train_labels_dir = os.path.join(
-                self.project_dir, "annot_static", "labels", "train"
+                annotations_dir, "annot_static", "labels", "train"
             )
             static_val_labels_dir = os.path.join(
-                self.project_dir, "annot_static", "labels", "val"
+                annotations_dir, "annot_static", "labels", "val"
             )
 
             motion_train_images_dir = os.path.join(
-                self.project_dir, "annot_motion", "images", "train"
+                annotations_dir, "annot_motion", "images", "train"
             )
             motion_val_images_dir = os.path.join(
-                self.project_dir, "annot_motion", "images", "val"
+                annotations_dir, "annot_motion", "images", "val"
             )
             motion_train_labels_dir = os.path.join(
-                self.project_dir, "annot_motion", "labels", "train"
+                annotations_dir, "annot_motion", "labels", "train"
             )
             motion_val_labels_dir = os.path.join(
-                self.project_dir, "annot_motion", "labels", "val"
+                annotations_dir, "annot_motion", "labels", "val"
             )
 
             # create directories (images + labels)
@@ -1202,10 +1209,10 @@ class SettingsEditorApp(tk.Tk):
             }
 
             static_yaml_output = os.path.join(
-                self.project_dir, "static_annotations.yaml"
+                annotations_dir, "static_annotations.yaml"
             )
             motion_yaml_output = os.path.join(
-                self.project_dir, "motion_annotations.yaml"
+                annotations_dir, "motion_annotations.yaml"
             )
 
             # write YAMLs, preserve order of names
@@ -1228,9 +1235,10 @@ class SettingsEditorApp(tk.Tk):
 
     def _has_existing_annotations(self):
         """Return True if annot_motion or annot_static contain any images/labels (train or val)."""
+        annotations_dir = os.path.join(self.project_dir, DEFAULT_ANNOTATIONS_FOLDER)
         for base in ("annot_motion", "annot_static"):
             for sub in ("images/train", "images/val", "labels/train", "labels/val"):
-                path = os.path.join(self.project_dir, base, sub)
+                path = os.path.join(annotations_dir, base, sub)
                 if os.path.isdir(path):
                     # check for any files
                     try:
@@ -1293,14 +1301,15 @@ class SettingsEditorApp(tk.Tk):
         Skip any directory that already ends with _backupN so backups are not re-backed-up.
         """
         backed = []
-        primary_dir = os.path.join(self.project_dir, "model_primary_motion")
+        models_dir = os.path.join(self.project_dir, "models")
+        primary_dir = os.path.join(models_dir, "model_primary_motion")
         if os.path.isdir(primary_dir):
             b = self._backup_dir(primary_dir)
             if b:
                 backed.append(b)
 
         # also backup the primary static (in case motion blocks static has changed) - secondary static aren't changed
-        primary_dir = os.path.join(self.project_dir, "model_primary_static")
+        primary_dir = os.path.join(models_dir, "model_primary_static")
         if os.path.isdir(primary_dir):
             b = self._backup_dir(primary_dir)
             if b:
@@ -1309,13 +1318,13 @@ class SettingsEditorApp(tk.Tk):
         # secondary directories start with 'model_secondary_motion'
         # skip any names that already end with _backup<number>
         backup_suffix_re = re.compile(r"_backup\d+$")
-        for name in sorted(os.listdir(self.project_dir)):
+        for name in sorted(os.listdir(models_dir)):
             if not name.startswith("model_secondary_motion"):
                 continue
             # ignore directories that are already backuped (name ends with _backupN)
             if backup_suffix_re.search(name):
                 continue
-            path = os.path.join(self.project_dir, name)
+            path = os.path.join(models_dir, name)
             if os.path.isdir(path):
                 b = self._backup_dir(path)
                 if b:
