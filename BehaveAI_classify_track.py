@@ -1,19 +1,19 @@
-import configparser
 import csv
 import glob
 import os
 import shutil
 
 # ~ import config_watcher
-import sys
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import messagebox
 
 import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from ultralytics import YOLO
+
+from load_configs import params
 
 # --- NCNN helper utilities -----------------------
 
@@ -176,291 +176,6 @@ def move_to_expected(project_path, run_name="train", runs_root="runs"):
         return None
 
 
-# ---------- Project-aware configuration loading --------------------------
-
-
-def pick_ini_via_dialog():
-    root = tk.Tk()
-    root.withdraw()
-    path = filedialog.askopenfilename(
-        title="Select BehaveAI settings INI",
-        filetypes=[("INI files", "*.ini"), ("All files", "*.*")],
-    )
-    root.destroy()
-    return path
-
-
-# Determine config_path (accept project dir or direct INI path)
-if len(sys.argv) > 1:
-    arg = os.path.abspath(sys.argv[1])
-    if os.path.isdir(arg):
-        config_path = os.path.join(arg, "BehaveAI_settings.ini")
-    else:
-        config_path = arg
-else:
-    config_path = pick_ini_via_dialog()
-    if not config_path:
-        tk.messagebox.showinfo(
-            "No settings file", "No settings INI selected — exiting."
-        )
-        sys.exit(0)
-
-config_path = os.path.abspath(config_path)
-if not os.path.exists(config_path):
-    tk.messagebox.showerror(
-        "Missing settings", f"Configuration file not found: {config_path}"
-    )
-    sys.exit(1)
-
-# Set project directory to the INI parent and make it the working directory
-project_dir = os.path.dirname(config_path)
-os.chdir(project_dir)
-print(f"Working directory set to project dir: {project_dir}")
-print(f"Using settings file: {config_path}")
-
-# Load configuration
-config = configparser.ConfigParser()
-config.optionxform = str  # keep case
-config.read(config_path)
-
-
-# Helper: resolve a path from INI (absolute or relative to project_dir)
-def resolve_project_path(value, fallback):
-    if value is None or str(value).strip() == "":
-        value = fallback
-    value = str(value)
-    if os.path.isabs(value):
-        return os.path.normpath(value)
-    return os.path.normpath(os.path.join(project_dir, value))
-
-
-# Read dataset / directory keys from INI (defaults are relative names inside the project)
-clips_dir_ini = config["DEFAULT"].get("clips_dir", "clips")
-input_dir_ini = config["DEFAULT"].get("input_dir", "input")
-output_dir_ini = config["DEFAULT"].get("output_dir", "output")
-
-clips_dir = resolve_project_path(clips_dir_ini, "clips")
-input_folder = resolve_project_path(input_dir_ini, "input")
-output_folder = resolve_project_path(output_dir_ini, "output")
-
-
-# Read parameters
-try:
-    primary_motion_classes = [
-        name.strip() for name in config["DEFAULT"]["primary_motion_classes"].split(",")
-    ]
-    cols = [
-        c.strip()
-        for c in config["DEFAULT"].get("primary_motion_colors", "").split(";")
-        if c.strip()
-    ]
-    primary_motion_colors = [tuple(map(int, c.split(",")))[::-1] for c in cols]
-    primary_motion_hotkeys = [
-        key.strip() for key in config["DEFAULT"]["primary_motion_hotkeys"].split(",")
-    ]
-
-    secondary_motion_classes = [
-        name.strip()
-        for name in config["DEFAULT"]["secondary_motion_classes"].split(",")
-    ]
-    cols = [
-        c.strip()
-        for c in config["DEFAULT"].get("secondary_motion_colors", "").split(";")
-        if c.strip()
-    ]
-    secondary_motion_colors = [tuple(map(int, c.split(",")))[::-1] for c in cols]
-    secondary_motion_hotkeys = [
-        key.strip() for key in config["DEFAULT"]["secondary_motion_hotkeys"].split(",")
-    ]
-
-    primary_static_classes = [
-        name.strip() for name in config["DEFAULT"]["primary_static_classes"].split(",")
-    ]
-    cols = [
-        c.strip()
-        for c in config["DEFAULT"].get("primary_static_colors", "").split(";")
-        if c.strip()
-    ]
-    primary_static_colors = [tuple(map(int, c.split(",")))[::-1] for c in cols]
-    primary_static_hotkeys = [
-        key.strip() for key in config["DEFAULT"]["primary_static_hotkeys"].split(",")
-    ]
-
-    secondary_static_classes = [
-        name.strip()
-        for name in config["DEFAULT"]["secondary_static_classes"].split(",")
-    ]
-    cols = [
-        c.strip()
-        for c in config["DEFAULT"].get("secondary_static_colors", "").split(";")
-        if c.strip()
-    ]
-    secondary_static_colors = [tuple(map(int, c.split(",")))[::-1] for c in cols]
-    secondary_static_hotkeys = [
-        key.strip() for key in config["DEFAULT"]["secondary_static_hotkeys"].split(",")
-    ]
-
-    if len(secondary_motion_classes) >= 2 or len(secondary_static_classes) >= 2:
-        hierarchical_mode = True
-        motion_cropped_base_dir = "annot_motion_crop"
-        static_cropped_base_dir = "annot_static_crop"
-
-        # secondary classes need more than one value, so clear if there's only one value
-        if len(secondary_motion_classes) == 1:
-            secondary_motion_classes = []
-            secondary_motion_colors = []
-            secondary_motion_hotkeys = []
-
-        if len(secondary_static_classes) == 1:
-            secondary_static_classes = []
-            secondary_static_colors = []
-            secondary_static_hotkeys = []
-
-    else:
-        hierarchical_mode = False
-
-    primary_classes = primary_static_classes + primary_motion_classes
-    primary_colors = primary_static_colors + primary_motion_colors
-    primary_hotkeys = primary_static_hotkeys + primary_motion_hotkeys
-
-    secondary_classes = secondary_static_classes + secondary_motion_classes
-    secondary_colors = secondary_static_colors + secondary_motion_colors
-    secondary_hotkeys = secondary_static_hotkeys + secondary_motion_hotkeys
-
-    primary_static_project_path = "model_primary_static"
-    primary_static_model_path = os.path.join(
-        "model_primary_static", "train", "weights", "best.pt"
-    )
-    primary_static_yaml_path = "static_annotations.yaml"
-
-    primary_motion_project_path = "model_primary_motion"
-    primary_motion_model_path = os.path.join(
-        "model_primary_motion", "train", "weights", "best.pt"
-    )
-    primary_motion_yaml_path = "motion_annotations.yaml"
-
-    ignore_secondary = [
-        name.strip() for name in config["DEFAULT"]["ignore_secondary"].split(",")
-    ]
-    dominant_source = config["DEFAULT"]["dominant_source"].lower()
-
-    primary_classifier = config["DEFAULT"].get("primary_classifier", "yolo11s.pt")
-    primary_epochs = int(config["DEFAULT"].get("primary_epochs", "50"))
-    secondary_classifier = config["DEFAULT"].get(
-        "secondary_classifier", "yolo11s-cls.pt"
-    )
-    secondary_epochs = int(config["DEFAULT"].get("secondary_epochs", "50"))
-
-    if hierarchical_mode:
-        secondary_static_project_path = "model_secondary_static"
-        secondary_static_data_path = "annot_static_crop"
-        secondary_static_model_path = os.path.join(
-            "model_secondary_static", "train", "weights", "best.pt"
-        )
-
-        secondary_motion_project_path = "model_secondary_motion"
-        secondary_motion_data_path = "annot_motion_crop"
-        secondary_motion_model_path = os.path.join(
-            "model_secondary_motion", "train", "weights", "best.pt"
-        )
-
-        secondary_class_ids = list(range(len(secondary_classes)))
-        paired = list(
-            zip(
-                secondary_classes,
-                secondary_colors,
-                secondary_class_ids,
-                secondary_hotkeys,
-            )
-        )
-        paired_sorted = sorted(paired, key=lambda x: x[0].lower())
-        secondary_classes, secondary_colors, secondary_class_ids, secondary_hotkeys = (
-            zip(*paired_sorted)
-        )
-        # Convert back to lists
-        secondary_classes = list(secondary_classes)
-        secondary_colors = list(secondary_colors)
-        secondary_class_ids = list(secondary_class_ids)
-        secondary_hotkeys = list(secondary_hotkeys)
-
-    # Common parameters
-    scale_factor = float(config["DEFAULT"].get("scale_factor", "1.0"))
-    expA = float(config["DEFAULT"].get("expA", "0.5"))
-    expB = float(config["DEFAULT"].get("expB", "0.8"))
-    lum_weight = float(config["DEFAULT"].get("lum_weight", "0.7"))
-    strategy = config["DEFAULT"].get("strategy", "exponential")
-    chromatic_tail_only = config["DEFAULT"]["chromatic_tail_only"].lower()
-    rgb_multipliers = [
-        float(x) for x in config["DEFAULT"]["rgb_multipliers"].split(",")
-    ]
-    use_ncnn = config["DEFAULT"]["use_ncnn"].lower()
-    primary_conf_thresh = float(config["DEFAULT"].get("primary_conf_thresh", "0.5"))
-    secondary_conf_thresh = float(config["DEFAULT"].get("secondary_conf_thresh", "0.5"))
-    match_distance_thresh = float(config["DEFAULT"].get("match_distance_thresh", "200"))
-    delete_after_missed = float(config["DEFAULT"].get("delete_after_missed", "5"))
-    centroid_merge_thresh = float(config["DEFAULT"].get("centroid_merge_thresh", "50"))
-    iou_thresh = float(config["DEFAULT"].get("iou_thresh", "0.95"))
-    line_thickness = int(config["DEFAULT"].get("line_thickness", "1"))
-    font_size = float(config["DEFAULT"].get("font_size", "0.5"))
-    frame_skip = int(config["DEFAULT"].get("frame_skip", "0"))
-
-    process_noise_pos = float(config["kalman"].get("process_noise_pos", "0.01"))
-    process_noise_vel = float(config["kalman"].get("process_noise_vel", "0.1"))
-    measurement_noise = float(config["kalman"].get("measurement_noise", "0.1"))
-    motion_threshold = -1 * int(config["DEFAULT"].get("motion_threshold", "0"))
-
-except KeyError as e:
-    raise KeyError(f"Missing configuration parameter: {e}")
-
-
-# Validate configuration
-
-if len(primary_motion_classes) != len(primary_motion_colors) or len(
-    primary_motion_classes
-) != len(primary_motion_hotkeys):
-    raise ValueError(
-        "Primary motion classes, colors and hotkeys must match in configuration."
-    )
-if len(secondary_motion_classes) != len(secondary_motion_colors) or len(
-    secondary_motion_classes
-) != len(secondary_motion_hotkeys):
-    raise ValueError(
-        "Secondary motion classes, colors and hotkeys must match in configuration."
-    )
-if len(primary_static_classes) != len(primary_static_colors) or len(
-    primary_static_classes
-) != len(primary_static_hotkeys):
-    raise ValueError(
-        "Primary static classes, colors and hotkeys must match in configuration."
-    )
-if len(secondary_static_classes) != len(secondary_static_colors) or len(
-    secondary_static_classes
-) != len(secondary_static_hotkeys):
-    raise ValueError(
-        "Secondary static classes, colors and hotkeys must match in configuration."
-    )
-if (
-    dominant_source != "motion"
-    and dominant_source != "static"
-    and dominant_source != "confidence"
-):
-    raise ValueError("dominant_source must be motion, static, or confidence")
-
-if len(primary_static_classes) > 0:
-    if not os.path.exists(primary_static_yaml_path):
-        print(
-            "Error: Primary static YAML file not found. Run the Annotation script once to fix this"
-        )
-        sys.exit(1)
-
-if len(primary_motion_classes) > 0:
-    if not os.path.exists(primary_motion_yaml_path):
-        print(
-            "Error: Primary motion YAML file not found. Run the Annotation script once to fix this"
-        )
-        sys.exit(1)
-
-
 # ~ # check whether settings have been changed, and motion annotation library needs rebuilding
 # ~ settings_changed = config_watcher.check_settings_changed(current_config_path=config_path, saved_config_path=None, model_dirs=['model_primary_motion'])
 # ~ # Globals for prompting/behaviour inside maybe_retrain
@@ -602,7 +317,7 @@ def maybe_retrain(
                 # ~ dst = os.path.join(project_path, os.path.basename(config_path))
                 dst = os.path.join(project_path, "saved_settings.ini")
                 try:
-                    shutil.copy2(config_path, dst)
+                    shutil.copy2(params["config_path"], dst)
                     print(f"Saved settings snapshot to {dst}")
                 except Exception as e:
                     print(f"Warning: could not copy settings to model dir: {e}")
@@ -647,7 +362,7 @@ def maybe_retrain(
         # ~ dst = os.path.join(project_path, os.path.basename(config_path))
         dst = os.path.join(project_path, "saved_settings.ini")
         try:
-            shutil.copy2(config_path, dst)
+            shutil.copy2(params["config_path"], dst)
             print(f"Saved settings snapshot to {dst}")
         except Exception as e:
             print(f"Warning: could not copy settings to model dir: {e}")
@@ -659,22 +374,23 @@ def maybe_retrain(
 secondary_static_models = None
 secondary_motion_models = None
 
-if hierarchical_mode:
+if params["hierarchical_mode"]:
     secondary_static_models = {}
     static_class_map = [
-        [None] * len(secondary_classes) for _ in range(len(primary_classes))
+        [None] * len(params["secondary_classes"])
+        for _ in range(len(params["primary_classes"]))
     ]
-    if len(secondary_static_classes) >= 2:
-        for primary_class in primary_classes:
-            idx = primary_classes.index(primary_class)
-            hotkey = primary_hotkeys[idx]
-            if hotkey in secondary_hotkeys:
+    if len(params["secondary_static_classes"]) >= 2:
+        for primary_class in params["primary_classes"]:
+            idx = params["primary_classes"].index(primary_class)
+            hotkey = params["primary_hotkeys"][idx]
+            if hotkey in params["secondary_hotkeys"]:
                 continue
 
-            if primary_class in ignore_secondary:
+            if primary_class in params["ignore_secondary"]:
                 continue
 
-            data_dir = os.path.join(secondary_static_data_path, primary_class)
+            data_dir = os.path.join(params["secondary_static_data_path"], primary_class)
             # Skip if directory doesn't exist
             if not os.path.isdir(data_dir):
                 continue
@@ -696,13 +412,13 @@ if hierarchical_mode:
                 data_dir,
                 model_dir,
                 weights_path,
-                secondary_classifier,
-                secondary_epochs,
+                params["secondary_classifier"],
+                params["secondary_epochs"],
                 224,
             )
 
             # Load the trained model
-            if use_ncnn == "true":
+            if params["use_ncnn"] == "true":
                 secondary_static_models[primary_class] = (
                     load_model_with_ncnn_preference(weights_path, "classify")
                 )
@@ -713,19 +429,20 @@ if hierarchical_mode:
 
     secondary_motion_models = {}
     motion_class_map = [
-        [None] * len(secondary_classes) for _ in range(len(primary_classes))
+        [None] * len(params["secondary_classes"])
+        for _ in range(len(params["primary_classes"]))
     ]
-    if len(secondary_motion_classes) >= 2:
-        for primary_class in primary_classes:
-            idx = primary_classes.index(primary_class)
-            hotkey = primary_hotkeys[idx]
-            if hotkey in secondary_hotkeys:
+    if len(params["secondary_motion_classes"]) >= 2:
+        for primary_class in params["primary_classes"]:
+            idx = params["primary_classes"].index(primary_class)
+            hotkey = params["primary_hotkeys"][idx]
+            if hotkey in params["secondary_hotkeys"]:
                 continue
 
-            if primary_class in ignore_secondary:
+            if primary_class in params["ignore_secondary"]:
                 continue
 
-            data_dir = os.path.join(secondary_motion_data_path, primary_class)
+            data_dir = os.path.join(params["secondary_motion_data_path"], primary_class)
             # Skip if directory doesn't exist
             if not os.path.isdir(data_dir):
                 continue
@@ -747,13 +464,13 @@ if hierarchical_mode:
                 data_dir,
                 model_dir,
                 weights_path,
-                secondary_classifier,
-                secondary_epochs,
+                params["secondary_classifier"],
+                params["secondary_epochs"],
                 224,
             )
 
             # Load the trained model
-            if use_ncnn == "true":
+            if params["use_ncnn"] == "true":
                 secondary_motion_models[primary_class] = (
                     load_model_with_ncnn_preference(weights_path, "classify")
                 )
@@ -763,34 +480,34 @@ if hierarchical_mode:
         # ~ print(f"secondary_motion_models {secondary_motion_models}")
 
 # -------CHECK PRIMARY MODEL EXISTS----------
-if primary_static_classes[0] != "0":
+if params["primary_static_classes"][0] != "0":
     maybe_retrain(
         "primary static",
-        primary_static_yaml_path,
-        primary_static_project_path,
-        primary_static_model_path,
-        primary_classifier,
-        primary_epochs,
+        params["primary_static_yaml_path"],
+        params["primary_static_project_path"],
+        params["primary_static_model_path"],
+        params["primary_classifier"],
+        params["primary_epochs"],
         640,
     )
 
 
-if primary_motion_classes[0] != "0":
+if params["primary_motion_classes"][0] != "0":
     maybe_retrain(
         "primary motion",
-        primary_motion_yaml_path,
-        primary_motion_project_path,
-        primary_motion_model_path,
-        primary_classifier,
-        primary_epochs,
+        params["primary_motion_yaml_path"],
+        params["primary_motion_project_path"],
+        params["primary_motion_model_path"],
+        params["primary_classifier"],
+        params["primary_epochs"],
         640,
     )
 
 
 # --- PARAMETERS -----------------------------------------------------------
 
-expA2 = 1 - expA
-expB2 = 1 - expB
+expA2 = 1 - params["expA"]
+expB2 = 1 - params["expB"]
 
 input_folder = "./input/"
 output_folder = "./output/"
@@ -839,17 +556,22 @@ class KalmanTracker:
         # Tune these covariances to your scene
 
         kf.processNoiseCov = np.diag(
-            [process_noise_pos, process_noise_pos, process_noise_vel, process_noise_vel]
+            [
+                params["process_noise_pos"],
+                params["process_noise_pos"],
+                params["process_noise_vel"],
+                params["process_noise_vel"],
+            ]
         ).astype(np.float32)
-        kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * measurement_noise
+        kf.measurementNoiseCov = (
+            np.eye(2, dtype=np.float32) * params["measurement_noise"]
+        )
         # Initialize state
         kf.statePre = np.array(
             [[initial_pt[0]], [initial_pt[1]], [0.0], [0.0]], dtype=np.float32
         )
         kf.statePost = kf.statePre.copy()
         return kf
-
-        self._prune_duplicate_tracks()
 
     def predict_all(self):
         """
@@ -989,8 +711,8 @@ def process_video(file):
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if not cap.isOpened():
         return
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) * scale_factor)
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * scale_factor)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) * params["scale_factor"])
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * params["scale_factor"])
     fps = cap.get(cv2.CAP_PROP_FPS)
     writer = cv2.VideoWriter(
         os.path.join(output_folder, base + "_detected.mp4"),
@@ -999,23 +721,25 @@ def process_video(file):
         (w, h),
     )
 
-    if primary_static_classes[0] != "0":
-        if use_ncnn == "true":
+    if params["primary_static_classes"][0] != "0":
+        if params["use_ncnn"] == "true":
             model_static = load_model_with_ncnn_preference(
-                primary_static_model_path, "detect"
+                params["primary_static_model_path"], "detect"
             )
         else:
-            model_static = YOLO(primary_static_model_path)
+            model_static = YOLO(params["primary_static_model_path"])
 
-    if primary_motion_classes[0] != "0":
-        if use_ncnn == "true":
+    if params["primary_motion_classes"][0] != "0":
+        if params["use_ncnn"] == "true":
             model_motion = load_model_with_ncnn_preference(
-                primary_motion_model_path, "detect"
+                params["primary_motion_model_path"], "detect"
             )
         else:
-            model_motion = YOLO(primary_motion_model_path)
+            model_motion = YOLO(params["primary_motion_model_path"])
 
-    tracker = KalmanTracker(match_distance_thresh, delete_after_missed)
+    tracker = KalmanTracker(
+        params["match_distance_thresh"], params["delete_after_missed"]
+    )
 
     prev_frames, frame_idx = None, 0
     csv_file = open(
@@ -1054,9 +778,12 @@ def process_video(file):
             break
         frame_idx += 1
         if frame_count == 0:
-            if scale_factor != 1.0:
+            if params["scale_factor"] != 1.0:
                 raw_frame = cv2.resize(
-                    raw_frame, None, fx=scale_factor, fy=scale_factor
+                    raw_frame,
+                    None,
+                    fx=params["scale_factor"],
+                    fy=params["scale_factor"],
                 )
             gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
             frame = raw_frame.copy()
@@ -1065,45 +792,69 @@ def process_video(file):
                 continue
 
             # only process motion information if necessary
-            if primary_motion_classes[0] != "0":
+            if params["primary_motion_classes"][0] != "0":
                 diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
 
-                if strategy == "exponential":
+                if params["strategy"] == "exponential":
                     prev_frames[0] = gray
                     prev_frames[1] = cv2.addWeighted(
-                        prev_frames[1], expA, gray, expA2, 0
+                        prev_frames[1], params["expA"], gray, params["expA2"], 0
                     )
                     prev_frames[2] = cv2.addWeighted(
-                        prev_frames[2], expB, gray, expB2, 0
+                        prev_frames[2], params["expB"], gray, params["expB2"], 0
                     )
-                elif strategy == "sequential":
+                elif params["strategy"] == "sequential":
                     prev_frames[2] = prev_frames[1]
                     prev_frames[1] = prev_frames[0]
                     prev_frames[0] = gray
 
-                if chromatic_tail_only == "true":
+                if params["chromatic_tail_only"] == "true":
                     tb = cv2.subtract(diffs[0], diffs[1])
                     tr = cv2.subtract(diffs[2], diffs[1])
                     tg = cv2.subtract(diffs[1], diffs[0])
 
                     blue = cv2.addWeighted(
-                        gray, lum_weight, tb, rgb_multipliers[2], motion_threshold
+                        gray,
+                        params["lum_weight"],
+                        tb,
+                        params["rgb_multipliers"][2],
+                        params["motion_threshold"],
                     )
                     green = cv2.addWeighted(
-                        gray, lum_weight, tg, rgb_multipliers[1], motion_threshold
+                        gray,
+                        params["lum_weight"],
+                        tg,
+                        params["rgb_multipliers"][1],
+                        params["motion_threshold"],
                     )
                     red = cv2.addWeighted(
-                        gray, lum_weight, tr, rgb_multipliers[0], motion_threshold
+                        gray,
+                        params["lum_weight"],
+                        tr,
+                        params["rgb_multipliers"][0],
+                        params["motion_threshold"],
                     )
                 else:
                     blue = cv2.addWeighted(
-                        gray, lum_weight, diffs[0], rgb_multipliers[2], motion_threshold
+                        gray,
+                        params["lum_weight"],
+                        diffs[0],
+                        params["rgb_multipliers"][2],
+                        params["motion_threshold"],
                     )
                     green = cv2.addWeighted(
-                        gray, lum_weight, diffs[1], rgb_multipliers[1], motion_threshold
+                        gray,
+                        params["lum_weight"],
+                        diffs[1],
+                        params["rgb_multipliers"][1],
+                        params["motion_threshold"],
                     )
                     red = cv2.addWeighted(
-                        gray, lum_weight, diffs[2], rgb_multipliers[0], motion_threshold
+                        gray,
+                        params["lum_weight"],
+                        diffs[2],
+                        params["rgb_multipliers"][0],
+                        params["motion_threshold"],
                     )
 
                 motion_image = cv2.merge((blue, green, red)).astype(np.uint8)
@@ -1112,14 +863,14 @@ def process_video(file):
             all_detections = []
 
             # Primary static detection
-            if primary_static_classes[0] != "0":
+            if params["primary_static_classes"][0] != "0":
                 results_static = model_static.predict(
-                    frame, conf=primary_conf_thresh, verbose=False
+                    frame, conf=params["primary_conf_thresh"], verbose=False
                 )
                 for box in results_static[0].boxes:
                     coords = tuple(map(int, box.xyxy[0].tolist()))
                     class_idx = int(box.cls[0])
-                    class_name = primary_static_classes[class_idx]
+                    class_name = params["primary_static_classes"][class_idx]
                     conf = float(box.conf[0])
                     all_detections.append(
                         {
@@ -1133,14 +884,14 @@ def process_video(file):
                     )
 
             # Primary motion detection
-            if primary_motion_classes[0] != "0":
+            if params["primary_motion_classes"][0] != "0":
                 results_motion = model_motion.predict(
-                    motion_image, conf=primary_conf_thresh, verbose=False
+                    motion_image, conf=params["primary_conf_thresh"], verbose=False
                 )
                 for box in results_motion[0].boxes:
                     coords = tuple(map(int, box.xyxy[0].tolist()))
                     class_idx = int(box.cls[0])
-                    class_name = primary_motion_classes[class_idx]
+                    class_name = params["primary_motion_classes"][class_idx]
                     conf = float(box.conf[0])
                     all_detections.append(
                         {
@@ -1170,11 +921,14 @@ def process_video(file):
                     overlap = iou((x1, y1, x2, y2), (md_x1, md_y1, md_x2, md_y2))
                     ms_source = md["source"]
 
-                    if dist < centroid_merge_thresh or overlap > iou_thresh:
+                    if (
+                        dist < params["centroid_merge_thresh"]
+                        or overlap > params["iou_thresh"]
+                    ):
                         # Merge classes - keep highest confidence detection for each source
                         if (
                             det["source"] == ms_source
-                            or dominant_source == "confidence"
+                            or params["dominant_source"] == "confidence"
                         ):  # mathcing sources so select best, or confidence strategy used
                             if det["source"] == "static":
                                 # Keep highest confidence static detection
@@ -1210,7 +964,10 @@ def process_video(file):
                                     ]  # Update to higher conf box
                                     md["centroid"] = (cx, cy)
                                     md["source"] = det["source"]
-                        elif det["source"] == "static" and dominant_source == "static":
+                        elif (
+                            det["source"] == "static"
+                            and params["dominant_source"] == "static"
+                        ):
                             # Keep static detection
                             md["primary_class_combined"] = md[
                                 "primary_class"
@@ -1221,7 +978,10 @@ def process_video(file):
                             md["coords"] = det["coords"]  # Update to higher conf box
                             md["centroid"] = (cx, cy)
                             md["source"] = det["source"]
-                        elif det["source"] == "motion" and dominant_source == "motion":
+                        elif (
+                            det["source"] == "motion"
+                            and params["dominant_source"] == "motion"
+                        ):
                             # Keep motion detection
                             md["primary_class_combined"] = md[
                                 "primary_class"
@@ -1280,7 +1040,7 @@ def process_video(file):
                     det["primary_static_class"] = primary_class_combined
                     det["primary_static_conf"] = primary_conf_combined
 
-                if hierarchical_mode:
+                if params["hierarchical_mode"]:
                     x1, y1, x2, y2 = coords
 
                     # Determine which secondary model to use based on source and configuration
@@ -1289,24 +1049,24 @@ def process_video(file):
 
                     if source == "static":
                         # Use static secondary model if configured
-                        if len(secondary_static_classes) >= 2:
+                        if len(params["secondary_static_classes"]) >= 2:
                             sec_model = secondary_static_models.get(primary_class, None)
                             crop_img = frame
                         # Fallback to motion secondary model if static not available
-                        elif len(secondary_motion_classes) >= 2:
+                        elif len(params["secondary_motion_classes"]) >= 2:
                             sec_model = secondary_motion_models.get(primary_class, None)
                             crop_img = (
                                 motion_image
-                                if primary_motion_classes[0] != "0"
+                                if params["primary_motion_classes"][0] != "0"
                                 else frame
                             )
                     else:  # motion source
                         # Use motion secondary model if configured
-                        if len(secondary_motion_classes) >= 2:
+                        if len(params["secondary_motion_classes"]) >= 2:
                             sec_model = secondary_motion_models.get(primary_class, None)
                             crop_img = motion_image
                         # Fallback to static secondary model if motion not available
-                        elif len(secondary_static_classes) >= 2:
+                        elif len(params["secondary_static_classes"]) >= 2:
                             sec_model = secondary_static_models.get(primary_class, None)
                             crop_img = frame
 
@@ -1372,50 +1132,62 @@ def process_video(file):
                     label_parts.append(f"{pm_class.upper()}")
                     primary_cls = pm_class
 
-                primary_col = primary_colors[primary_classes.index(primary_cls)]
+                primary_col = params["primary_colors"][
+                    params["primary_classes"].index(primary_cls)
+                ]
                 secondary_col = (255, 255, 255)
 
-                if hierarchical_mode:
+                if params["hierarchical_mode"]:
                     if sm_class != "" and sm_class != primary_cls:
                         secondary_cls = sm_class
-                        secondary_col = secondary_colors[
-                            secondary_classes.index(secondary_cls)
+                        secondary_col = params["secondary_colors"][
+                            params["secondary_classes"].index(secondary_cls)
                         ]
                     if ss_class != "" and ss_class != primary_cls:
                         secondary_cls = ss_class
-                        secondary_col = secondary_colors[
-                            secondary_classes.index(secondary_cls)
+                        secondary_col = params["secondary_colors"][
+                            params["secondary_classes"].index(secondary_cls)
                         ]
 
-                    if primary_cls in ignore_secondary:
+                    if primary_cls in params["primary_classes"]:
                         label = f"{tid} {primary_cls.upper()}"
                         label_size, _ = cv2.getTextSize(
-                            label, cv2.FONT_HERSHEY_SIMPLEX, font_size, line_thickness
+                            label,
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            params["font_size"],
+                            params["line_thickness"],
                         )
                         label_w, label_h = label_size
                         cv2.rectangle(
                             frame,
-                            (x1 - line_thickness, y1 - label_h - line_thickness * 4),
-                            (x1 + label_w + line_thickness * 2, y1),
+                            (
+                                x1 - params["line_thickness"],
+                                y1 - label_h - params["line_thickness"] * 4,
+                            ),
+                            (x1 + label_w + params["line_thickness"] * 2, y1),
                             (0, 0, 0),
                             -1,
                         )
                         cv2.rectangle(
-                            frame, (x1, y1), (x2, y2), primary_col, line_thickness
+                            frame,
+                            (x1, y1),
+                            (x2, y2),
+                            primary_col,
+                            params["line_thickness"],
                         )
                         cv2.putText(
                             frame,
                             label,
-                            (x1, y1 - line_thickness * 2),
+                            (x1, y1 - params["line_thickness"] * 2),
                             cv2.FONT_HERSHEY_SIMPLEX,
-                            font_size,
+                            params["font_size"],
                             primary_col,
-                            line_thickness,
+                            params["line_thickness"],
                             cv2.LINE_AA,
                         )
                     else:
                         # Draw outer static box (slightly larger)
-                        outer_thickness = line_thickness + 2
+                        outer_thickness = params["line_thickness"] + 2
                         cv2.rectangle(
                             frame,
                             (x1 - outer_thickness, y1 - outer_thickness),
@@ -1425,53 +1197,69 @@ def process_video(file):
                         )
                         label = f"{tid} {primary_cls.upper()} {secondary_cls}"
                         label_size, _ = cv2.getTextSize(
-                            label, cv2.FONT_HERSHEY_SIMPLEX, font_size, line_thickness
+                            label,
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            params["font_size"],
+                            params["line_thickness"],
                         )
                         label_w, label_h = label_size
                         cv2.rectangle(
                             frame,
-                            (x1 - line_thickness, y1 - label_h - line_thickness * 4),
-                            (x1 + label_w + line_thickness * 2, y1),
+                            (
+                                x1 - params["line_thickness"],
+                                y1 - label_h - params["line_thickness"] * 4,
+                            ),
+                            (x1 + label_w + params["line_thickness"] * 2, y1),
                             (0, 0, 0),
                             -1,
                         )
                         cv2.rectangle(
-                            frame, (x1, y1), (x2, y2), secondary_col, line_thickness
+                            frame,
+                            (x1, y1),
+                            (x2, y2),
+                            secondary_col,
+                            params["line_thickness"],
                         )
                         cv2.putText(
                             frame,
                             label,
-                            (x1, y1 - line_thickness * 2),
+                            (x1, y1 - params["line_thickness"] * 2),
                             cv2.FONT_HERSHEY_SIMPLEX,
-                            font_size,
+                            params["font_size"],
                             secondary_col,
-                            line_thickness,
+                            params["line_thickness"],
                             cv2.LINE_AA,
                         )
                 else:
                     label = f"{tid} {primary_cls}"
                     label_size, _ = cv2.getTextSize(
-                        label, cv2.FONT_HERSHEY_SIMPLEX, font_size, line_thickness
+                        label,
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        params["font_size"],
+                        params["line_thickness"],
                     )
                     label_w, label_h = label_size
                     cv2.rectangle(
                         frame,
-                        (x1 - line_thickness, y1 - label_h - line_thickness * 4),
-                        (x1 + label_w + line_thickness * 2, y1),
+                        (
+                            x1 - params["line_thickness"],
+                            y1 - label_h - params["line_thickness"] * 4,
+                        ),
+                        (x1 + label_w + params["line_thickness"] * 2, y1),
                         (0, 0, 0),
                         -1,
                     )
                     cv2.rectangle(
-                        frame, (x1, y1), (x2, y2), primary_col, line_thickness
+                        frame, (x1, y1), (x2, y2), primary_col, params["line_thickness"]
                     )
                     cv2.putText(
                         frame,
                         label,
-                        (x1, y1 - line_thickness * 3),
+                        (x1, y1 - params["line_thickness"] * 3),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        font_size,
+                        params["font_size"],
                         primary_col,
-                        line_thickness,
+                        params["line_thickness"],
                         cv2.LINE_AA,
                     )
 
@@ -1489,17 +1277,21 @@ def process_video(file):
                         (int(x), int(y)),
                         (int(next_x), int(next_y)),
                         primary_col,
-                        line_thickness,
+                        params["line_thickness"],
                     )
                     cv2.circle(
                         frame,
                         (int(next_x), int(next_y)),
                         3,
                         light_color,
-                        -line_thickness,
+                        -params["line_thickness"],
                     )
                     cv2.circle(
-                        frame, (int(cx), int(cy)), 3, primary_col, -line_thickness
+                        frame,
+                        (int(cx), int(cy)),
+                        3,
+                        primary_col,
+                        -params["line_thickness"],
                     )
 
                 # Write to CSV
@@ -1524,24 +1316,30 @@ def process_video(file):
             text_color = (255, 255, 255)  # white text
             label = str(current_frame)
             label_size, _ = cv2.getTextSize(
-                label, cv2.FONT_HERSHEY_SIMPLEX, font_size, line_thickness
+                label,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                params["font_size"],
+                params["line_thickness"],
             )
             label_w, label_h = label_size
             cv2.rectangle(
                 frame,
                 (0, 0),
-                (label_w + line_thickness * 4, label_h + line_thickness * 4),
+                (
+                    label_w + params["line_thickness"] * 4,
+                    label_h + params["line_thickness"] * 4,
+                ),
                 (0, 0, 0),
                 -1,
             )
             cv2.putText(
                 frame,
                 label,
-                (line_thickness * 2, label_h + line_thickness * 2),
+                (params["line_thickness"] * 2, label_h + params["line_thickness"] * 2),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                font_size,
+                params["font_size"],
                 text_color,
-                line_thickness,
+                params["line_thickness"],
             )
 
             writer.write(frame)
@@ -1549,7 +1347,9 @@ def process_video(file):
             if print_tick > progress_update:
                 elapsed = time.time() - start_time
                 current_fps = current_frame / elapsed if elapsed > 0 else 0
-                pc_done = 100 * (frame_skip + 1) * current_frame / total_frames
+                pc_done = (
+                    100 * (params["frame_skip"] + 1) * current_frame / total_frames
+                )
                 print(
                     f"Progress: {pc_done:.2f}% | {current_fps:.1f} FPS",
                     end="\r",
@@ -1561,7 +1361,7 @@ def process_video(file):
 
         frame_count += 1
 
-        if frame_count > frame_skip:
+        if frame_count > params["frame_skip"]:
             frame_count = 0
 
     cap.release()
