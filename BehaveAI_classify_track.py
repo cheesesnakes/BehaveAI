@@ -370,140 +370,150 @@ def maybe_retrain(
         return True
 
 
-# Train secondary classifiers for each static class
+def train_models():
 
+    global secondary_static_models, secondary_motion_models, static_class_map, motion_class_map
 
-secondary_static_models = None
-secondary_motion_models = None
+    # Train secondary classifiers for each static class
 
-if params["hierarchical_mode"]:
-    secondary_static_models = {}
-    static_class_map = [
-        [None] * len(params["secondary_classes"])
-        for _ in range(len(params["primary_classes"]))
-    ]
-    if len(params["secondary_static_classes"]) >= 2:
-        for primary_class in params["primary_classes"]:
-            idx = params["primary_classes"].index(primary_class)
-            hotkey = params["primary_hotkeys"][idx]
-            if hotkey in params["secondary_hotkeys"]:
-                continue
+    secondary_static_models = None
+    secondary_motion_models = None
 
-            if primary_class in params["ignore_secondary"]:
-                continue
+    if params["hierarchical_mode"]:
+        secondary_static_models = {}
+        static_class_map = [
+            [None] * len(params["secondary_classes"])
+            for _ in range(len(params["primary_classes"]))
+        ]
+        if len(params["secondary_static_classes"]) >= 2:
+            for primary_class in params["primary_classes"]:
+                idx = params["primary_classes"].index(primary_class)
+                hotkey = params["primary_hotkeys"][idx]
+                if hotkey in params["secondary_hotkeys"]:
+                    continue
 
-            data_dir = os.path.join(params["secondary_static_data_path"], primary_class)
-            # Skip if directory doesn't exist
-            if not os.path.isdir(data_dir):
-                continue
+                if primary_class in params["ignore_secondary"]:
+                    continue
 
-            # Create model directory for this static class
-            model_dir = f"model_static_static_{primary_class}"
-            weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
-
-            n_image = count_images_in_dataset(data_dir)
-
-            if n_image < 2:
-                print(
-                    f"Error: Not enough images to train secondary motion model for primary class '{primary_class}' (found {n_image}, need at least 2). Skipping this secondary model."
+                data_dir = os.path.join(
+                    params["secondary_static_data_path"], primary_class
                 )
-                continue
+                # Skip if directory doesn't exist
+                if not os.path.isdir(data_dir):
+                    continue
 
-            maybe_retrain(
-                model_dir,
-                data_dir,
-                model_dir,
-                weights_path,
-                params["secondary_classifier"],
-                params["secondary_epochs"],
-                224,
-            )
+                # Create model directory for this static class
+                model_dir = f"model_static_static_{primary_class}"
+                weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
 
-            # Load the trained model
-            if params["use_ncnn"] == "true":
-                secondary_static_models[primary_class] = (
-                    load_model_with_ncnn_preference(weights_path, "classify")
+                n_image = count_images_in_dataset(data_dir)
+
+                if n_image < 2:
+                    print(
+                        f"Error: Not enough images to train secondary motion model for primary class '{primary_class}' (found {n_image}, need at least 2). Skipping this secondary model."
+                    )
+                    continue
+
+                maybe_retrain(
+                    model_dir,
+                    data_dir,
+                    model_dir,
+                    weights_path,
+                    params["secondary_classifier"],
+                    params["secondary_epochs"],
+                    224,
                 )
-            else:
-                secondary_static_models[primary_class] = YOLO(weights_path)
 
-        # ~ print(f"secondary_static_models {secondary_static_models}")
+                # Load the trained model
+                if params["use_ncnn"] == "true":
+                    secondary_static_models[primary_class] = (
+                        load_model_with_ncnn_preference(weights_path, "classify")
+                    )
+                else:
+                    secondary_static_models[primary_class] = YOLO(weights_path)
 
-    secondary_motion_models = {}
-    motion_class_map = [
-        [None] * len(params["secondary_classes"])
-        for _ in range(len(params["primary_classes"]))
-    ]
-    if len(params["secondary_motion_classes"]) >= 2:
-        for primary_class in params["primary_classes"]:
-            idx = params["primary_classes"].index(primary_class)
-            hotkey = params["primary_hotkeys"][idx]
-            if hotkey in params["secondary_hotkeys"]:
-                continue
+            # ~ print(f"secondary_static_models {secondary_static_models}")
 
-            if primary_class in params["ignore_secondary"]:
-                continue
+        # Train secondary classifiers for each motion class
 
-            data_dir = os.path.join(params["secondary_motion_data_path"], primary_class)
-            # Skip if directory doesn't exist
-            if not os.path.isdir(data_dir):
-                continue
+        secondary_motion_models = {}
+        motion_class_map = [
+            [None] * len(params["secondary_classes"])
+            for _ in range(len(params["primary_classes"]))
+        ]
+        if len(params["secondary_motion_classes"]) >= 2:
+            for primary_class in params["primary_classes"]:
+                idx = params["primary_classes"].index(primary_class)
+                hotkey = params["primary_hotkeys"][idx]
+                if hotkey in params["secondary_hotkeys"]:
+                    continue
 
-            # Create model directory for this static class
-            model_dir = f"model_secondary_motion_{primary_class}"
-            weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
+                if primary_class in params["ignore_secondary"]:
+                    continue
 
-            n_image = count_images_in_dataset(data_dir)
-
-            if n_image < 2:
-                print(
-                    f"Error: Not enough images to train secondary motion model for primary class '{primary_class}' (found {n_image}, need at least 2). Skipping this secondary model."
+                data_dir = os.path.join(
+                    params["secondary_motion_data_path"], primary_class
                 )
-                continue
+                # Skip if directory doesn't exist
+                if not os.path.isdir(data_dir):
+                    continue
 
-            maybe_retrain(
-                model_dir,
-                data_dir,
-                model_dir,
-                weights_path,
-                params["secondary_classifier"],
-                params["secondary_epochs"],
-                224,
-            )
+                # Create model directory for this static class
+                model_dir = f"model_secondary_motion_{primary_class}"
+                weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
 
-            # Load the trained model
-            if params["use_ncnn"] == "true":
-                secondary_motion_models[primary_class] = (
-                    load_model_with_ncnn_preference(weights_path, "classify")
+                n_image = count_images_in_dataset(data_dir)
+
+                if n_image < 2:
+                    print(
+                        f"Error: Not enough images to train secondary motion model for primary class '{primary_class}' (found {n_image}, need at least 2). Skipping this secondary model."
+                    )
+                    continue
+
+                maybe_retrain(
+                    model_dir,
+                    data_dir,
+                    model_dir,
+                    weights_path,
+                    params["secondary_classifier"],
+                    params["secondary_epochs"],
+                    224,
                 )
-            else:
-                secondary_motion_models[primary_class] = YOLO(weights_path)
 
-        # ~ print(f"secondary_motion_models {secondary_motion_models}")
+                # Load the trained model
+                if params["use_ncnn"] == "true":
+                    secondary_motion_models[primary_class] = (
+                        load_model_with_ncnn_preference(weights_path, "classify")
+                    )
+                else:
+                    secondary_motion_models[primary_class] = YOLO(weights_path)
 
-# -------CHECK PRIMARY MODEL EXISTS----------
-if params["primary_static_classes"][0] != "0":
-    maybe_retrain(
-        "primary static",
-        params["primary_static_yaml_path"],
-        params["primary_static_project_path"],
-        params["primary_static_model_path"],
-        params["primary_classifier"],
-        params["primary_epochs"],
-        640,
-    )
+            # ~ print(f"secondary_motion_models {secondary_motion_models}")
 
+    # Train primary classifiers (if not in hierarchical mode - otherwise they will be trained as part of the secondary model training, using the same data but different hotkeys)
+    # -------CHECK PRIMARY MODEL EXISTS----------
+    if params["primary_static_classes"][0] != "0":
+        maybe_retrain(
+            "primary static",
+            params["primary_static_yaml_path"],
+            params["primary_static_project_path"],
+            params["primary_static_model_path"],
+            params["primary_classifier"],
+            params["primary_epochs"],
+            640,
+        )
 
-if params["primary_motion_classes"][0] != "0":
-    maybe_retrain(
-        "primary motion",
-        params["primary_motion_yaml_path"],
-        params["primary_motion_project_path"],
-        params["primary_motion_model_path"],
-        params["primary_classifier"],
-        params["primary_epochs"],
-        640,
-    )
+    if params["primary_motion_classes"][0] != "0":
+        maybe_retrain(
+            "primary motion",
+            params["primary_motion_yaml_path"],
+            params["primary_motion_project_path"],
+            params["primary_motion_model_path"],
+            params["primary_classifier"],
+            params["primary_epochs"],
+            640,
+        )
+
 
 # iou function that returns the larger proportional overlap of box1 and box2, relative to their own areas. This way if one box is entirely inside another, it will return 1.0, rather than a smaller value as with traditional iou.
 
@@ -1364,5 +1374,6 @@ def process_video(file):
 
 
 if __name__ == "__main__":
+    train_models()
     for vid in glob.glob(os.path.join(params["input_folder"], "*.*")):
         process_video(vid)
