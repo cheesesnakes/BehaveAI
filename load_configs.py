@@ -124,6 +124,7 @@ def read_parameters():
     params["model_folder"] = MODEL_FOLDER
     params["config_path"] = config_path
     params["project_dir"] = project_dir
+    params["progress_update"] = int(config["DEFAULT"].get("progress_update", "10"))
 
     try:
         params["primary_motion_classes"] = [

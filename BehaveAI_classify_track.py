@@ -371,6 +371,8 @@ def maybe_retrain(
 
 
 # Train secondary classifiers for each static class
+
+
 secondary_static_models = None
 secondary_motion_models = None
 
@@ -503,16 +505,7 @@ if params["primary_motion_classes"][0] != "0":
         640,
     )
 
-
-# --- PARAMETERS -----------------------------------------------------------
-
-expA2 = 1 - params["expA"]
-expB2 = 1 - params["expB"]
-
-input_folder = "./input/"
-output_folder = "./output/"
-
-progress_update = 10  # print progress every n frames
+# iou function that returns the larger proportional overlap of box1 and box2, relative to their own areas. This way if one box is entirely inside another, it will return 1.0, rather than a smaller value as with traditional iou.
 
 
 def iou(box1, box2):
@@ -705,7 +698,7 @@ class KalmanTracker:
 
 # --- MAIN PROCESSING -----------------------------------------------------
 def process_video(file):
-    os.makedirs(output_folder, exist_ok=True)
+    os.makedirs(params["output_folder"], exist_ok=True)
     base = os.path.splitext(os.path.basename(file))[0]
     cap = cv2.VideoCapture(file)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -715,7 +708,7 @@ def process_video(file):
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * params["scale_factor"])
     fps = cap.get(cv2.CAP_PROP_FPS)
     writer = cv2.VideoWriter(
-        os.path.join(output_folder, base + "_detected.mp4"),
+        os.path.join(params["output_folder"], base + "_detected.mp4"),
         cv2.VideoWriter_fourcc(*"mp4v"),
         fps,
         (w, h),
@@ -743,7 +736,7 @@ def process_video(file):
 
     prev_frames, frame_idx = None, 0
     csv_file = open(
-        os.path.join(output_folder, base + "_tracking.csv"), "w", newline=""
+        os.path.join(params["output_folder"], base + "_tracking.csv"), "w", newline=""
     )
     csv_writer = csv.writer(csv_file)
     # Updated CSV header with four streams
@@ -1344,7 +1337,7 @@ def process_video(file):
 
             writer.write(frame)
 
-            if print_tick > progress_update:
+            if print_tick > params["progress_update"]:
                 elapsed = time.time() - start_time
                 current_fps = current_frame / elapsed if elapsed > 0 else 0
                 pc_done = (
@@ -1371,5 +1364,5 @@ def process_video(file):
 
 
 if __name__ == "__main__":
-    for vid in glob.glob(os.path.join(input_folder, "*.*")):
+    for vid in glob.glob(os.path.join(params["input_folder"], "*.*")):
         process_video(vid)
