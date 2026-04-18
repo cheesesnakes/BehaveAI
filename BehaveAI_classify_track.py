@@ -4,6 +4,7 @@ import os
 import shutil
 
 # ~ import config_watcher
+import sys
 import time
 import tkinter as tk
 from tkinter import messagebox
@@ -332,9 +333,9 @@ def maybe_retrain(
         # Model missing -> do first-time training
         print(f"{model_type} model not found, building it...")
         current_count = count_images_in_dataset(yaml_path)
-        if current_count < 2:
+        if current_count < 5:
             print(
-                f"Error: Not enough images to train {model_type} model (found {current_count}, need at least 2)."
+                f"Error: Not enough images to train {model_type} model (found {current_count}, need at least 5)."
             )
             return False
 
@@ -732,7 +733,13 @@ def process_video(file):
                 params["primary_static_model_path"], "detect"
             )
         else:
-            model_static = YOLO(params["primary_static_model_path"])
+            if os.path.isfile(params["primary_static_model_path"] + "/best.pt"):
+                model_static = YOLO(params["primary_static_model_path"])
+            else:
+                print(
+                    "Primary static model not trained, likely due to insufficient annotations. Please add more training images and re-train the model."
+                )
+                sys.exit(1)
 
     if params["primary_motion_classes"][0] != "0":
         if params["use_ncnn"] == "true":
