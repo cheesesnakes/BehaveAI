@@ -11,6 +11,8 @@ import os
 import subprocess
 from random import uniform
 
+from tqdm.asyncio import tqdm
+
 # ----------------
 
 
@@ -40,8 +42,8 @@ def config_parse():
     )
     parser.add_argument(
         "--work-dir",
-        default="clips_workdir",
-        help="Directory to store intermediate clips (default: clips_workdir).",
+        default="samples",
+        help="Directory to store intermediate clips (default: samples).",
     )
 
     parser.add_argument(
@@ -59,9 +61,8 @@ def config_parse():
 
 def clips():
     global CSV_PATH, SOURCE_DIR, SOURCE_EXT
-
+    clip_info = {}
     if CSV_PATH is None or not os.path.exists(CSV_PATH):
-        clip_info = {}
         print("CSV file not found, defaulting to all videos in source directory.")
         for file in os.listdir(SOURCE_DIR):
             if file.endswith(SOURCE_EXT):
@@ -72,7 +73,22 @@ def clips():
 
     with open(CSV_PATH, newline="") as f:
         reader = csv.DictReader(f)
-        return reader
+
+        for row in reader:
+            sample_id = (
+                row["deployment_id"].strip()
+                + row["plot_id"].strip()
+                + row["sample_id"].strip()
+            )
+            sample_s = float(row["clip_time"].split(":")[0]) * 60 + float(
+                row["clip_time"].split(":")[1]
+            )
+            clip_info[sample_id] = {
+                "file_name": row["file_name"].strip(),
+                "sample_s": sample_s,
+            }
+
+    return clip_info
 
 
 # cut clips
@@ -80,37 +96,36 @@ def cut_clip():
     global CSV_PATH, SOURCE_DIR, SOURCE_EXT, CLIP_DURATION, WORK_DIR
 
     clip_paths = []
+    failed = []
     reader = clips()
-    print(reader)
-    # Assumes columns: deployment, sample_s, predator_present, completed
-    for (
-        i,
-        row,
-    ) in reader.items() if isinstance(reader, dict) else enumerate(reader):
+
+    for i, row in reader.items():
         print(f"Processing row {i}: {row}")
-        # Extract info from the row
         file_name = row["file_name"].strip()
         start_s = float(row["sample_s"])
+        if file_name[-4:] == SOURCE_EXT:
+            file_name = file_name[:-4]
         source = f"{SOURCE_DIR}/{file_name}{SOURCE_EXT}"
 
-        # Check source exists, skip if missing
         if not os.path.exists(source):
             print(f"  ! missing source: {source}, skipping")
+            failed.append((i, source, "missing source file"))
             continue
 
-        # Define output clip path
         if not os.path.exists(WORK_DIR):
             os.makedirs(WORK_DIR)
 
-        out_clip = f"{WORK_DIR}/{file_name}_sampled.mp4"
+        if file_name.count("/") > 0:
+            file_name = file_name.split("/")[-1]
+            out_clip = f"{WORK_DIR}/{i}.mp4"
+        else:
+            out_clip = f"{WORK_DIR}/{file_name}_sampled.mp4"
 
-        # Re-encode so all clips have matching codecs/timebases for clean concat.
-        # Slower than stream-copy but far more reliable across mixed sources.
         cmd = [
             "ffmpeg",
             "-y",
             "-ss",
-            str(start_s),  # seek before -i = fast seek
+            str(start_s),
             "-i",
             str(source),
             "-t",
@@ -125,24 +140,77 @@ def cut_clip():
             "aac",
             "-b:a",
             "160k",
-            "-vsync",
+            "-fps_mode",
             "cfr",
             "-r",
-            "30",  # force constant frame rate
+            "30",
+            "-progress",
+            "pipe:1",
+            "-nostats",
             str(out_clip),
         ]
 
-        # Debug print for progress tracking
-        print(f"[{i}] {file_name} cut @ {start_s}s -> {out_clip}")
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,  # capture stderr so we can report it on failure
+                text=True,
+                bufsize=1,
+            )
 
-        # Run the command, suppressing output for cleaner logs
-        subprocess.run(
-            cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+            pbar = tqdm(total=round(CLIP_DURATION, 2), unit="s", desc=f"Encoding {i}")
+            current_time = 0.0
 
-        # Add the successfully created clip to the list
+            for line in process.stdout:
+                line = line.strip()
+                if line.startswith("out_time_ms="):
+                    ms = line.split("=")[1]
+                    if ms.strip() == "N/A":
+                        continue
+                    new_time = round(int(ms) / 1_000_000, 2)
+                    pbar.update(new_time - current_time)
+                    current_time = new_time
+                elif line == "progress=end":
+                    pbar.update(CLIP_DURATION - current_time)
+                    break
 
-        clip_paths.append(out_clip)
+            pbar.close()
+            process.wait()
+
+            # check ffmpeg exit code
+            if process.returncode != 0:
+                stderr_output = process.stderr.read()
+                failed.append(
+                    (
+                        i,
+                        source,
+                        f"ffmpeg exited with code {process.returncode}: {stderr_output[:200]}",
+                    )
+                )
+                continue
+
+            # check the output file actually has content
+            if not os.path.exists(out_clip) or os.path.getsize(out_clip) == 0:
+                failed.append((i, source, "output file is empty or missing"))
+                continue
+
+            clip_paths.append(out_clip)
+
+        except Exception as e:
+            failed.append((i, source, str(e)))
+            continue
+
+    # report failures at the end
+    if failed:
+        print(f"\n{'=' * 40}")
+        print(f"  {len(failed)} clip(s) failed:")
+        for row_i, src, reason in failed:
+            print(f"  row {row_i} | {src}")
+            print(f"    reason: {reason}")
+        print(f"{'=' * 40}\n")
+    else:
+        print("\nAll clips processed successfully.")
 
     return clip_paths
 

@@ -4,3 +4,5 @@ __pycache__/
 .vscode/
 *.csv
 clips*/
+samples/
+clips
