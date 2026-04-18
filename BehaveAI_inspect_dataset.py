@@ -1,14 +1,12 @@
+
 #!/usr/bin/env python3
 
-import configparser
 import os
 import sys
-
-# import random
 import time
 import tkinter as tk
+from tkinter import ttk
 from collections import deque
-from tkinter import filedialog, messagebox, ttk
 
 import cv2
 import numpy as np
@@ -23,232 +21,65 @@ except Exception:
     YOLO = None
 
 
-# ---------- Determine settings INI path and project directory ----------
-def choose_ini_path_from_dialog():
-    root = tk.Tk()
-    root.withdraw()
-    ini_path = filedialog.askopenfilename(
-        title="Select BehaveAI settings INI",
-        filetypes=[("INI files", "*.ini"), ("All files", "*.*")],
-    )
-    root.destroy()
-    return ini_path
+# Load params from config
+from load_configs import load_params
 
+params = load_params()
 
-if len(sys.argv) > 1:
-    arg = os.path.abspath(sys.argv[1])
-    if os.path.isdir(arg):
-        config_path = os.path.join(arg, "BehaveAI_settings.ini")
-    else:
-        config_path = arg
-else:
-    config_path = choose_ini_path_from_dialog()
-    if not config_path:
-        tk.messagebox.showinfo(
-            "No settings file", "No settings INI selected — exiting."
-        )
-        sys.exit(0)
+# Unpack all needed params
+primary_static_classes = params["primary_static_classes"]
+primary_classes = params["primary_classes"]
+primary_hotkeys = params["primary_hotkeys"]
+primary_colors = params["primary_colors"]
+secondary_classes = params["secondary_classes"]
+secondary_hotkeys = params["secondary_hotkeys"]
+secondary_colors = params["secondary_colors"]
+clips_dir = params["clips_dir"]
+static_train_images_dir = params["static_train_images_dir"]
+static_val_images_dir = params["static_val_images_dir"]
+static_train_labels_dir = params["static_train_labels_dir"]
+static_val_labels_dir = params["static_val_labels_dir"]
+motion_train_images_dir = params["motion_train_images_dir"]
+motion_val_images_dir = params["motion_val_images_dir"]
+motion_train_labels_dir = params["motion_train_labels_dir"]
+motion_val_labels_dir = params["motion_val_labels_dir"]
+motion_cropped_base_dir = params.get("motion_cropped_base_dir", "")
+static_cropped_base_dir = params.get("static_cropped_base_dir", "")
+hierarchical_mode = params["hierarchical_mode"]
+ignore_secondary = params["ignore_secondary"]
+strategy = params["strategy"]
+expA = params["expA"]
+expB = params["expB"]
+font_size = params["font_size"]
+frame_skip = params["frame_skip"]
+primary_static_model_path = params["primary_static_model_path"]
+primary_motion_model_path = params["primary_motion_model_path"]
+line_thickness = params["line_thickness"]
+primary_conf_thresh = params["primary_conf_thresh"]
+save_empty_frames = params["save_empty_frames"]
+motion_blocks_static = params["motion_blocks_static"]
+static_blocks_motion = params["static_blocks_motion"]
+secondary_static_classes = params.get("secondary_static_classes", [])
+secondary_motion_classes = params.get("secondary_motion_classes", [])
+secondary_static_data_path = params.get("secondary_static_data_path", "")
+secondary_motion_data_path = params.get("secondary_motion_data_path", "")
+val_frequency = params.get("val_frequency", 0.1)
+primary_motion_classes = params.get("primary_motion_classes", [])
+primary_motion_colors = params.get("primary_motion_colors", [])
+primary_motion_hotkeys = params.get("primary_motion_hotkeys", [])
+secondary_motion_colors = params.get("secondary_motion_colors", [])
+secondary_motion_hotkeys = params.get("secondary_motion_hotkeys", [])
+primary_static_colors = params.get("primary_static_colors", [])
+primary_static_hotkeys = params.get("primary_static_hotkeys", [])
+secondary_static_colors = params.get("secondary_static_colors", [])
+secondary_static_hotkeys = params.get("secondary_static_hotkeys", [])
+iou_thresh = params.get("iou_thresh", 0.95)
+scale_factor = params.get("scale_factor", 1.0)
+lum_weight = params.get("lum_weight", 0.7)
+rgb_multipliers = params.get("rgb_multipliers", [1.0, 1.0, 1.0])
+motion_threshold = params.get("motion_threshold", 0)
+chromatic_tail_only = params.get("chromatic_tail_only", "false")
 
-config_path = os.path.abspath(config_path)
-if not os.path.exists(config_path):
-    try:
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror(
-            "Missing settings", f"Configuration file not found: {config_path}"
-        )
-        root.destroy()
-    except Exception:
-        print(f"Configuration file not found: {config_path}")
-    sys.exit(1)
-
-project_dir = os.path.dirname(config_path)
-os.chdir(project_dir)
-print(f"Using project directory: {project_dir}")
-print(f"Using config file: {config_path}")
-
-# Load config
-config = configparser.ConfigParser()
-config.optionxform = str
-config.read(config_path)
-
-
-def resolve_project_path(value, fallback):
-    if value is None or str(value).strip() == "":
-        value = fallback
-    value = str(value)
-    if os.path.isabs(value):
-        return os.path.normpath(value)
-    return os.path.normpath(os.path.join(project_dir, value))
-
-
-clips_dir_ini = config["DEFAULT"].get("clips_dir", "clips")
-clips_dir = resolve_project_path(clips_dir_ini, "clips")
-
-# Read parameters (copied from your inspector; keep consistent)
-try:
-    primary_motion_classes = [
-        name.strip() for name in config["DEFAULT"]["primary_motion_classes"].split(",")
-    ]
-    cols = [
-        c.strip()
-        for c in config["DEFAULT"].get("primary_motion_colors", "").split(";")
-        if c.strip()
-    ]
-    primary_motion_colors = [tuple(map(int, c.split(",")))[::-1] for c in cols]
-    primary_motion_hotkeys = [
-        key.strip() for key in config["DEFAULT"]["primary_motion_hotkeys"].split(",")
-    ]
-
-    secondary_motion_classes = [
-        name.strip()
-        for name in config["DEFAULT"]["secondary_motion_classes"].split(",")
-    ]
-    cols = [
-        c.strip()
-        for c in config["DEFAULT"].get("secondary_motion_colors", "").split(";")
-        if c.strip()
-    ]
-    secondary_motion_colors = [tuple(map(int, c.split(",")))[::-1] for c in cols]
-    secondary_motion_hotkeys = [
-        key.strip() for key in config["DEFAULT"]["secondary_motion_hotkeys"].split(",")
-    ]
-
-    primary_static_classes = [
-        name.strip() for name in config["DEFAULT"]["primary_static_classes"].split(",")
-    ]
-    cols = [
-        c.strip()
-        for c in config["DEFAULT"].get("primary_static_colors", "").split(";")
-        if c.strip()
-    ]
-    primary_static_colors = [tuple(map(int, c.split(",")))[::-1] for c in cols]
-    primary_static_hotkeys = [
-        key.strip() for key in config["DEFAULT"]["primary_static_hotkeys"].split(",")
-    ]
-
-    secondary_static_classes = [
-        name.strip()
-        for name in config["DEFAULT"]["secondary_static_classes"].split(",")
-    ]
-    cols = [
-        c.strip()
-        for c in config["DEFAULT"].get("secondary_static_colors", "").split(";")
-        if c.strip()
-    ]
-    secondary_static_colors = [tuple(map(int, c.split(",")))[::-1] for c in cols]
-    secondary_static_hotkeys = [
-        key.strip() for key in config["DEFAULT"]["secondary_static_hotkeys"].split(",")
-    ]
-
-    primary_static_project_path = "model_primary_static"
-    primary_static_model_path = os.path.join(
-        "model_primary_static", "train", "weights", "best.pt"
-    )
-    primary_static_yaml_path = "static_annotations.yaml"
-
-    primary_motion_project_path = "model_primary_motion"
-    primary_motion_model_path = os.path.join(
-        "model_primary_motion", "train", "weights", "best.pt"
-    )
-    primary_motion_yaml_path = "motion_annotations.yaml"
-
-    ignore_secondary = [
-        name.strip() for name in config["DEFAULT"]["ignore_secondary"].split(",")
-    ]
-    dominant_source = config["DEFAULT"]["dominant_source"].lower()
-
-    if len(secondary_motion_classes) >= 2 or len(secondary_static_classes) >= 2:
-        hierarchical_mode = True
-        motion_cropped_base_dir = "annot_motion_crop"
-        static_cropped_base_dir = "annot_static_crop"
-        if len(secondary_motion_classes) == 1:
-            secondary_motion_classes = []
-            secondary_motion_colors = []
-            secondary_motion_hotkeys = []
-        if len(secondary_static_classes) == 1:
-            secondary_static_classes = []
-            secondary_static_colors = []
-            secondary_static_hotkeys = []
-    else:
-        hierarchical_mode = False
-        motion_cropped_base_dir = ""
-        static_cropped_base_dir = ""
-
-    primary_classes = primary_static_classes + primary_motion_classes
-    primary_colors = primary_static_colors + primary_motion_colors
-    primary_hotkeys = primary_static_hotkeys + primary_motion_hotkeys
-
-    secondary_classes = secondary_static_classes + secondary_motion_classes
-    secondary_colors = secondary_static_colors + secondary_motion_colors
-    secondary_hotkeys = secondary_static_hotkeys + secondary_motion_hotkeys
-
-    if hierarchical_mode:
-        secondary_static_project_path = "model_secondary_static"
-        secondary_static_data_path = "annot_static_crop"
-        secondary_static_model_path = os.path.join(
-            "model_secondary_static", "train", "weights", "best.pt"
-        )
-
-        secondary_motion_project_path = "model_secondary_motion"
-        secondary_motion_data_path = "annot_motion_crop"
-        secondary_motion_model_path = os.path.join(
-            "model_secondary_motion", "train", "weights", "best.pt"
-        )
-
-        secondary_class_ids = list(range(len(secondary_classes)))
-        paired = list(
-            zip(
-                secondary_classes,
-                secondary_colors,
-                secondary_class_ids,
-                secondary_hotkeys,
-            )
-        )
-        paired_sorted = sorted(paired, key=lambda x: x[0].lower())
-        secondary_classes, secondary_colors, secondary_class_ids, secondary_hotkeys = (
-            zip(*paired_sorted)
-        )
-        secondary_classes = list(secondary_classes)
-        secondary_colors = list(secondary_colors)
-        secondary_class_ids = list(secondary_class_ids)
-        secondary_hotkeys = list(secondary_hotkeys)
-
-    static_train_images_dir = "annot_static/images/train"
-    static_val_images_dir = "annot_static/images/val"
-    static_train_labels_dir = "annot_static/labels/train"
-    static_val_labels_dir = "annot_static/labels/val"
-
-    motion_train_images_dir = "annot_motion/images/train"
-    motion_val_images_dir = "annot_motion/images/val"
-    motion_train_labels_dir = "annot_motion/labels/train"
-    motion_val_labels_dir = "annot_motion/labels/val"
-
-    # Common parameters
-    scale_factor = float(config["DEFAULT"].get("scale_factor", "1.0"))
-    expA = float(config["DEFAULT"].get("expA", "0.5"))
-    expB = float(config["DEFAULT"].get("expB", "0.8"))
-    val_frequency = float(config["DEFAULT"].get("val_frequency", "0.1"))
-
-    lum_weight = float(config["DEFAULT"].get("lum_weight", "0.7"))
-    strategy = config["DEFAULT"].get("strategy", "exponential")
-    chromatic_tail_only = config["DEFAULT"]["chromatic_tail_only"].lower()
-    primary_conf_thresh = float(config["DEFAULT"].get("primary_conf_thresh", "0.5"))
-    secondary_conf_thresh = float(config["DEFAULT"].get("secondary_conf_thresh", "0.5"))
-    rgb_multipliers = [
-        float(x) for x in config["DEFAULT"]["rgb_multipliers"].split(",")
-    ]
-    line_thickness = int(config["DEFAULT"].get("line_thickness", "1"))
-    font_size = float(config["DEFAULT"].get("font_size", "0.5"))
-    iou_thresh = float(config["DEFAULT"].get("iou_thresh", "0.95"))
-    motion_blocks_static = config["DEFAULT"]["motion_blocks_static"].lower()
-    static_blocks_motion = config["DEFAULT"]["static_blocks_motion"].lower()
-    save_empty_frames = config["DEFAULT"]["save_empty_frames"].lower()
-    frame_skip = int(config["DEFAULT"].get("frame_skip", "0"))
-    motion_threshold = -1 * int(config["DEFAULT"].get("motion_threshold", "0"))
-
-except KeyError as e:
-    raise KeyError(f"Missing configuration parameter: {e}")
 
 # Basic validation
 if len(primary_motion_classes) > len(primary_motion_colors) or len(
