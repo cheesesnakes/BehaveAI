@@ -1,5 +1,45 @@
 #!/usr/bin/env python3
+"""
+annotation.py
+=============
 
+Interactive Tk-based annotation tool. Users step through frames of a video
+and draw bounding boxes with primary (and optionally secondary) class labels;
+the tool saves YOLO-format label files plus image crops that later feed the
+training pipeline in `classify_track.py`.
+
+Optional AI assist: if primary/secondary YOLO models are already trained,
+pressing the auto-annotate key runs them over the current frame to seed
+boxes that the user can correct, speeding up the semi-supervised loop.
+
+Outputs written per frame (under the project root):
+
+    annotations/annot_static/images/{train,val}/<video>_<frame>.jpg
+    annotations/annot_static/labels/{train,val}/<video>_<frame>.txt
+    annotations/annot_motion/images/{train,val}/<video>_<frame>.jpg
+    annotations/annot_motion/labels/{train,val}/<video>_<frame>.txt
+    annotations/annot_static/masks/{train,val}/<video>_<frame>.mask.txt
+    annotations/annot_motion/masks/{train,val}/<video>_<frame>.mask.txt
+
+Plus, in hierarchical mode:
+
+    annotations/annot_static_crop/<primary>/<secondary>/<video>_<frame>_<x>_<y>.jpg
+    annotations/annot_motion_crop/<primary>/<secondary>/<video>_<frame>_<x>_<y>.jpg
+
+Missing-model handling
+----------------------
+Primary static/motion YOLO models are optional — if `best.pt` is missing
+(e.g. first run, not enough data to train yet), `model_static` / `model_motion`
+stay `None` and the auto-annotate feature simply skips that stream. The
+tool remains fully usable for manual annotation.
+
+Secondary (per-primary-class) classifiers are also optional. A missing
+secondary `best.pt` leaves the corresponding key out of
+`secondary_*_models`, so the runtime `.get(primary_class, None)` returns
+`None` and secondary classification is skipped for that class. Boxes
+produced without a secondary model carry `secondary_cls = -1` as a sentinel
+and are handled explicitly by the rendering + save code.
+"""
 
 import os
 import random
@@ -14,7 +54,8 @@ import numpy as np
 from index_annotations import AnnotationIndex
 from PIL import Image, ImageTk
 
-# Try to import YOLO
+# YOLO is soft-required: the annotation tool still works for manual labelling
+# if ultralytics isn't installed — only the auto-annotate assist is disabled.
 try:
     from ultralytics import YOLO
 except Exception:
@@ -191,25 +232,62 @@ ANIM_FPS = 8
 last_anim_draw = 0.0
 ANIM_DT = 1.0 / ANIM_FPS
 
-# Load models
+# ============================================================================
+# Model loading — all optional, all best-effort
+# ----------------------------------------------------------------------------
+# Four kinds of models may exist on disk:
+#
+#   Primary:
+#     models/model_primary_static/train/weights/best.pt
+#     models/model_primary_motion/train/weights/best.pt
+#
+#   Secondary (one per primary class, hierarchical mode only):
+#     models/model_static_static_<primary>/train/weights/best.pt
+#     models/model_secondary_motion_<primary>/train/weights/best.pt
+#
+# NOTE: the secondary paths MUST match what classify_track.py writes (see
+# train_models() in classify_track.py — specifically the "models/..." prefix).
+# Without the "models/" prefix annotation.py silently never finds them, and
+# auto-annotate stops doing secondary classification.
+#
+# Any model that fails to load stays `None` (primary) or simply isn't inserted
+# into the dict (secondary). Downstream code is expected to handle that.
+# ============================================================================
+
+# Load primary models
 model_static = None
 model_motion = None
 if YOLO is not None:
     if os.path.exists(primary_static_model_path):
         try:
             model_static = YOLO(primary_static_model_path)
+            print("Loaded primary static model")
         except Exception as e:
             print("Failed to load primary static model:", e)
+    else:
+        print(
+            "Primary static model not trained — auto-annotate will skip static stream"
+        )
+
     if os.path.exists(primary_motion_model_path):
         try:
             model_motion = YOLO(primary_motion_model_path)
+            print("Loaded primary motion model")
         except Exception as e:
             print("Failed to load primary motion model:", e)
+    else:
+        print(
+            "Primary motion model not trained — auto-annotate will skip motion stream"
+        )
 
+# Load secondary models. Keys are only inserted for classes that successfully
+# loaded — a missing key at inference time is the signal to skip secondary
+# classification for that primary class.
 secondary_static_models = {}
 secondary_motion_models = {}
 
-if hierarchical_mode:
+if hierarchical_mode and YOLO is not None:
+    # ---- secondary STATIC classifiers (one per primary class) --------------
     secondary_static_models = {}
     static_class_map = [
         [None] * len(secondary_classes) for _ in range(len(primary_classes))
@@ -228,21 +306,24 @@ if hierarchical_mode:
             if not os.path.isdir(data_dir):
                 continue
 
-            # Create model directory for this static class
-            model_dir = f"model_static_static_{primary_class}"
+            # IMPORTANT: keep this path aligned with classify_track.train_models()
+            model_dir = f"models/model_static_static_{primary_class}"
             weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
 
-            # Check if model exists
-            if not os.path.exists(weights_path):
-                print(f'Secondary static model for "{primary_class}" not found')
-                # ~ secondary_motion_models[primary_class] = '0'
-            else:
-                print(f'Secondary static model for "{primary_class}" found')
-                # Load the trained model
+            if not os.path.isfile(weights_path):
+                print(f'Secondary static model for "{primary_class}" not trained')
+                continue
+
+            try:
                 secondary_static_models[primary_class] = YOLO(weights_path)
+                print(f'Loaded secondary static model for "{primary_class}"')
+            except Exception as e:
+                print(
+                    f'Failed to load secondary static model for "{primary_class}": {e} — '
+                    "skipping at inference"
+                )
 
-        # ~ print(f"secondary_static_models {secondary_static_models}")
-
+    # ---- secondary MOTION classifiers (one per primary class) --------------
     secondary_motion_models = {}
     motion_class_map = [
         [None] * len(secondary_classes) for _ in range(len(primary_classes))
@@ -261,29 +342,29 @@ if hierarchical_mode:
             if not os.path.isdir(data_dir):
                 continue
 
-            disk_classes = sorted(os.listdir(data_dir))
-
-            # Create model directory for this static class
-            model_dir = f"model_secondary_motion_{primary_class}"
+            # IMPORTANT: keep this path aligned with classify_track.train_models()
+            model_dir = f"models/model_secondary_motion_{primary_class}"
             weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
 
-            # Check if model exists
-            if not os.path.exists(weights_path):
-                print(f'Secondary motion model for "{primary_class}" not found')
-                # ~ secondary_motion_models[primary_class] = '0'
-            else:
-                print(f'Secondary motion model for "{primary_class}" found')
-                # Load the trained model
-                secondary_motion_models[primary_class] = YOLO(weights_path)
-                # ~ motion_model_count += 1
+            if not os.path.isfile(weights_path):
+                print(f'Secondary motion model for "{primary_class}" not trained')
+                continue
 
-        # ~ print(f"secondary_motion_models {secondary_motion_models}")
+            try:
+                secondary_motion_models[primary_class] = YOLO(weights_path)
+                print(f'Loaded secondary motion model for "{primary_class}"')
+            except Exception as e:
+                print(
+                    f'Failed to load secondary motion model for "{primary_class}": {e} — '
+                    "skipping at inference"
+                )
 
 
 # Helper: convert BGR -> PhotoImage
 
 
 def cv2_to_photoimage(bgr_img):
+    """Convert an OpenCV BGR numpy image to a Tk PhotoImage for canvas display."""
     rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
     pil = Image.fromarray(rgb)
     return ImageTk.PhotoImage(pil)
@@ -336,6 +417,12 @@ def non_max_suppression(box_list):
 
 
 def iou(box1, box2):
+    """
+    Return the LARGER proportional overlap relative to each box's own area.
+    Not a symmetric IoU — if one box is entirely inside another, this
+    returns 1.0, which is the semantic we want for NMS here (a small
+    box fully contained inside a big one should be suppressed).
+    """
     xa = max(box1[0], box2[0])
     ya = max(box1[1], box2[1])
     xb = min(box1[2], box2[2])
@@ -352,9 +439,13 @@ def iou(box1, box2):
 
 
 # ------------------------------
-# Load saved labels for a given base (video_label_frame)
+# Label file helpers
 # ------------------------------
 def norm_to_pixels(xc, yc, bw, bh, w, h):
+    """
+    Convert a YOLO-format normalised box (center_x, center_y, width, height
+    all in [0, 1]) to pixel-space (x1, y1, x2, y2) clamped to the frame.
+    """
     cx = float(xc) * w
     cy = float(yc) * h
     bw_p = float(bw) * w
@@ -372,8 +463,23 @@ def norm_to_pixels(xc, yc, bw, bh, w, h):
 
 # Auto-annotate: uses model_static / model_motion and per-primary secondary models
 def auto_annotate_local():
+    """
+    Run whichever primary/secondary models are currently loaded on the current
+    frame and push their detections into the global `boxes` list as a starting
+    point the user can correct. Does nothing for streams whose model is
+    missing — it's safe to call with only one or zero models loaded.
+
+    Output tuple shapes appended to `boxes`:
+        hierarchical mode:  (x1, y1, x2, y2, primary_cls, secondary_cls,
+                             primary_conf, secondary_conf)
+        flat mode:          (x1, y1, x2, y2, primary_cls, conf)
+
+    Sentinel values: when hierarchical mode is on but no secondary model is
+    available for the detected primary class, `secondary_cls = -1` and
+    `secondary_conf = 1.0`. Downstream rendering + saving code must treat
+    `-1` as "no secondary" rather than an index into `secondary_classes`.
+    """
     # Collect all primary detections
-    # ~ all_detections = []
     global boxes
 
     # Primary static detection
@@ -382,18 +488,21 @@ def auto_annotate_local():
             fr, conf=primary_conf_thresh, verbose=False
         )
         for box in results_static[0].boxes:
-            # ~ coords = tuple(map(int, box.xyxy[0].tolist()))
             class_idx = int(box.cls[0])
             primary_class = primary_static_classes[class_idx]
             conf = float(box.conf[0])
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
             if hierarchical_mode:
-                # crop and run secondary classifier on static image
+                # Pre-initialise so we can't hit UnboundLocalError if neither
+                # secondary-classes list has >= 2 entries.
+                sec_model = None
+                crop_img = None
+
+                # Prefer static secondary; fall back to motion secondary.
                 if len(secondary_static_classes) >= 2:
                     sec_model = secondary_static_models.get(primary_class, None)
                     crop_img = fr
-                # Fallback to motion secondary model if static not available
                 elif len(secondary_motion_classes) >= 2:
                     sec_model = secondary_motion_models.get(primary_class, None)
                     crop_img = motion_image if primary_motion_classes[0] != "0" else fr
@@ -403,6 +512,7 @@ def auto_annotate_local():
                 if crop_img is not None:
                     crop = crop_img[y1:y2, x1:x2]
 
+                # Defaults: -1 is the "no secondary model" sentinel.
                 secondary_conf = 1.0
                 secondary_class_idx = -1
 
@@ -424,7 +534,7 @@ def auto_annotate_local():
                         conf,
                         secondary_conf,
                     )
-                )  # conf 1 & 2 need separating
+                )
 
             else:
                 boxes.append((x1, y1, x2, y2, class_idx, conf))
@@ -446,11 +556,14 @@ def auto_annotate_local():
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
 
                 if hierarchical_mode:
-                    # crop and run secondary classifier on static image
+                    # Pre-initialise to avoid UnboundLocalError in edge cases.
+                    sec_model = None
+                    crop_img = None
+
+                    # Prefer static secondary; fall back to motion secondary.
                     if len(secondary_static_classes) >= 2:
                         sec_model = secondary_static_models.get(primary_class, None)
                         crop_img = fr
-                    # Fallback to motion secondary model if static not available
                     elif len(secondary_motion_classes) >= 2:
                         sec_model = secondary_motion_models.get(primary_class, None)
                         crop_img = (
@@ -462,6 +575,7 @@ def auto_annotate_local():
                     if crop_img is not None:
                         crop = crop_img[y1:y2, x1:x2]
 
+                    # Defaults: -1 is the "no secondary model" sentinel.
                     secondary_conf = 1.0
                     secondary_class_idx = -1
 
@@ -472,6 +586,9 @@ def auto_annotate_local():
                             secondary_class_idx = sec_results[0].probs.top1
                             secondary_conf = sec_results[0].probs.top1conf.item()
 
+                    # Motion primary class indices are offset by the number
+                    # of static primary classes — the combined primary_classes
+                    # list is [static..., motion...].
                     boxes.append(
                         (
                             x1,
@@ -483,7 +600,7 @@ def auto_annotate_local():
                             conf,
                             secondary_conf,
                         )
-                    )  # conf 1 & 2 need separating
+                    )
 
                 else:
                     boxes.append(
@@ -624,6 +741,29 @@ def draw_boxes_on_image(base_img):
 
 
 def save_annotation():
+    """
+    Persist the user's current boxes + grey-box masks to disk in the shape
+    expected by the training pipeline:
+
+      * YOLO image + label files into annot_static/ and annot_motion/
+        (split randomly between train/ and val/ by `val_frequency`)
+      * Grey-box masks (rectangles the user wants excluded from training)
+        into the sibling masks/ directory
+      * In hierarchical mode, per-box crops into
+        annot_static_crop/<primary>/<secondary>/ and annot_motion_crop/...
+
+    Special handling
+    ----------------
+    * If both boxes and grey_boxes are empty AND `save_empty_frames != "true"`,
+      nothing is written.
+    * Boxes with `secondary_cls == -1` (auto-annotated with no secondary
+      model available) are written into the YOLO label files but skipped
+      from the hierarchical crop export — otherwise they'd land in the
+      wrong secondary-class folder via `secondary_classes[-1]` and poison
+      future training data.
+    * Target directories are created on demand so the tool works even if
+      the Settings GUI never ran to create them.
+    """
     global annot_count
     if (
         original_frame is None
@@ -631,7 +771,7 @@ def save_annotation():
         and save_empty_frames == "false"
     ):
         return
-    # randomly assign to valdiation
+    # randomly assign to validation
     randVal = random.random()
     is_val = randVal < val_frequency
 
@@ -640,6 +780,17 @@ def save_annotation():
 
     static_target_img_dir = static_val_images_dir if is_val else static_train_images_dir
     static_target_lbl_dir = static_val_labels_dir if is_val else static_train_labels_dir
+
+    # Ensure the four target dirs exist. These are normally created by the
+    # Settings GUI's _write_yaml_configs, but we shouldn't fail if a user
+    # runs annotation before opening settings.
+    for d in (
+        motion_target_img_dir,
+        motion_target_lbl_dir,
+        static_target_img_dir,
+        static_target_lbl_dir,
+    ):
+        os.makedirs(d, exist_ok=True)
 
     annot_type = "validation" if is_val else "training"
 
@@ -762,47 +913,53 @@ def save_annotation():
             )
 
     if hierarchical_mode:
+        # Export per-box crops into <base>/<primary>/<secondary>/ for the
+        # secondary classifier's class-folder dataset.
         for box in boxes:
             x1, y1, x2, y2, primary_cls, secondary_cls, _, _ = box
-            ####----Motion-----
-            # ~ if secondary_cls > len(secondary_static_classes)-1:
+
+            # Guard against the "no secondary model" sentinel from
+            # auto_annotate_local. Indexing secondary_classes[-1] would
+            # silently return the LAST class and write the crop into the
+            # wrong folder — a data-contamination bug. These boxes are
+            # still preserved in the primary YOLO label files above; we
+            # just skip the hierarchical crop export for them.
+            if secondary_cls is None or secondary_cls < 0:
+                continue
+            if secondary_cls >= len(secondary_classes):
+                print(
+                    f"Warning: secondary_cls {secondary_cls} out of range "
+                    f"(have {len(secondary_classes)} secondary classes); "
+                    "skipping this crop."
+                )
+                continue
+
+            # ----- Motion crop -----
             motion_crop = motion_ann_frame[y1:y2, x1:x2]
             if motion_crop.size == 0:
                 continue
 
-            # Create cropped image path
             primary_class_name = primary_classes[primary_cls]
             secondary_class_name = secondary_classes[secondary_cls]
 
-            # Create target directory (static_class/motion_class)
             motion_class_dir = os.path.join(
                 motion_cropped_base_dir, primary_class_name, secondary_class_name
             )
-
             os.makedirs(motion_class_dir, exist_ok=True)
-            # Save image
             crop_path = os.path.join(
                 motion_class_dir, f"{video_label}_{frame_number}_{x1}_{y1}.jpg"
             )
             cv2.imwrite(crop_path, motion_crop)
 
-            ####----Static-----
-            # ~ if secondary_cls < len(secondary_static_classes)-1:
+            # ----- Static crop -----
             static_crop = static_ann_frame[y1:y2, x1:x2]
             if static_crop.size == 0:
                 continue
 
-            # Create cropped image path
-            primary_class_name = primary_classes[primary_cls]
-            secondary_class_name = secondary_classes[secondary_cls]
-
-            # Create target directory (static_class/motion_class)
             static_class_dir = os.path.join(
                 static_cropped_base_dir, primary_class_name, secondary_class_name
             )
-
             os.makedirs(static_class_dir, exist_ok=True)
-            # Save image
             crop_path = os.path.join(
                 static_class_dir, f"{video_label}_{frame_number}_{x1}_{y1}.jpg"
             )
@@ -832,6 +989,18 @@ def save_annotation():
     print(f"Saved #{annot_count} frame {frame_number} -> {annot_type}")
 
     annot_count += 1
+
+
+# ============================================================================
+# Tk UI
+# ----------------------------------------------------------------------------
+# AnnotatorTk owns the main window: video canvas, right-side class palette,
+# seek bar, keyboard shortcuts, and the frame-stepping / playback state.
+# It reads and writes the module-level globals (`boxes`, `grey_boxes`,
+# `frame_number`, etc.) rather than holding them itself — a legacy shape
+# that persists because save_annotation() and draw_boxes_on_image() are
+# module-level functions that close over those globals.
+# ============================================================================
 
 
 # ---------- Tk UI (composite single-image display) ----------
