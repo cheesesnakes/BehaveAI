@@ -806,13 +806,57 @@ class SettingsEditorApp(tk.Tk):
             command=self._set_dirty,
         ).grid(row=4, column=1, sticky="w", padx=8)
 
+        # --- External pretrained static models (optional) ---
+        # If set, inference uses this file instead of the project's own
+        # trained best.pt. Leave blank to use the default trained model.
+        # Accepted: .pt, .torchscript, .onnx, .engine, or NCNN folder.
+        def _browse_model_file(var):
+            path = filedialog.askopenfilename(
+                title="Select pretrained model file",
+                filetypes=[
+                    ("Model files", "*.pt *.torchscript *.onnx *.engine"),
+                    ("All files", "*.*"),
+                ],
+            )
+            if path:
+                var.set(path)
+                self._set_dirty()
+
+        ttk.Label(tab3, text="Primary static external model").grid(
+            row=5, column=0, sticky="w", padx=8, pady=(12, 0)
+        )
+        self.primary_static_ext_var = tk.StringVar(value="")
+        ttk.Entry(tab3, textvariable=self.primary_static_ext_var, width=40).grid(
+            row=5, column=1, sticky="w", padx=8, pady=(12, 0)
+        )
+        ttk.Button(
+            tab3,
+            text="Browse…",
+            command=lambda: _browse_model_file(self.primary_static_ext_var),
+        ).grid(row=5, column=2, sticky="w", padx=4, pady=(12, 0))
+        self.primary_static_ext_var.trace_add("write", lambda *a: self._set_dirty())
+
+        ttk.Label(tab3, text="Secondary static external model").grid(
+            row=6, column=0, sticky="w", padx=8, pady=(6, 0)
+        )
+        self.secondary_static_ext_var = tk.StringVar(value="")
+        ttk.Entry(tab3, textvariable=self.secondary_static_ext_var, width=40).grid(
+            row=6, column=1, sticky="w", padx=8
+        )
+        ttk.Button(
+            tab3,
+            text="Browse…",
+            command=lambda: _browse_model_file(self.secondary_static_ext_var),
+        ).grid(row=6, column=2, sticky="w", padx=4)
+        self.secondary_static_ext_var.trace_add("write", lambda *a: self._set_dirty())
+
         self.use_ncnn_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             tab3, text="use_ncnn", variable=self.use_ncnn_var, command=self._set_dirty
-        ).grid(row=5, column=0, sticky="w", padx=8, pady=(8, 0))
+        ).grid(row=7, column=0, sticky="w", padx=8, pady=(8, 0))
 
         ttk.Label(tab3, text="Primary confidence thresh").grid(
-            row=6, column=0, sticky="w", padx=8, pady=(6, 0)
+            row=8, column=0, sticky="w", padx=8, pady=(6, 0)
         )
         self.primary_conf_var = tk.DoubleVar(value=0.5)
         ttk.Spinbox(
@@ -823,10 +867,10 @@ class SettingsEditorApp(tk.Tk):
             textvariable=self.primary_conf_var,
             width=6,
             command=self._set_dirty,
-        ).grid(row=6, column=1, sticky="w", padx=8)
+        ).grid(row=8, column=1, sticky="w", padx=8)
 
         ttk.Label(tab3, text="Secondary confidence thresh").grid(
-            row=7, column=0, sticky="w", padx=8, pady=(6, 0)
+            row=9, column=0, sticky="w", padx=8, pady=(6, 0)
         )
         self.secondary_conf_var = tk.DoubleVar(value=0.5)
         ttk.Spinbox(
@@ -837,10 +881,10 @@ class SettingsEditorApp(tk.Tk):
             textvariable=self.secondary_conf_var,
             width=6,
             command=self._set_dirty,
-        ).grid(row=7, column=1, sticky="w", padx=8)
+        ).grid(row=9, column=1, sticky="w", padx=8)
 
         ttk.Label(tab3, text="Dominant source").grid(
-            row=8, column=0, sticky="w", padx=8, pady=(8, 0)
+            row=10, column=0, sticky="w", padx=8, pady=(8, 0)
         )
         self.dominant_source_var = tk.StringVar(value="confidence")
         ttk.Combobox(
@@ -848,7 +892,52 @@ class SettingsEditorApp(tk.Tk):
             values=["confidence", "motion", "static"],
             textvariable=self.dominant_source_var,
             state="readonly",
-        ).grid(row=8, column=1, sticky="w", padx=8, pady=(8, 0))
+        ).grid(row=10, column=1, sticky="w", padx=8, pady=(8, 0))
+        self.dominant_source_var.trace_add("write", lambda *a: self._set_dirty())
+
+        self.use_ncnn_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            tab3, text="use_ncnn", variable=self.use_ncnn_var, command=self._set_dirty
+        ).grid(row=11, column=0, sticky="w", padx=8, pady=(8, 0))
+
+        ttk.Label(tab3, text="Primary confidence thresh").grid(
+            row=12, column=0, sticky="w", padx=8, pady=(6, 0)
+        )
+        self.primary_conf_var = tk.DoubleVar(value=0.5)
+        ttk.Spinbox(
+            tab3,
+            from_=0.0,
+            to=1.0,
+            increment=0.01,
+            textvariable=self.primary_conf_var,
+            width=6,
+            command=self._set_dirty,
+        ).grid(row=12, column=1, sticky="w", padx=8)
+
+        ttk.Label(tab3, text="Secondary confidence thresh").grid(
+            row=13, column=0, sticky="w", padx=8, pady=(6, 0)
+        )
+        self.secondary_conf_var = tk.DoubleVar(value=0.5)
+        ttk.Spinbox(
+            tab3,
+            from_=0.0,
+            to=1.0,
+            increment=0.01,
+            textvariable=self.secondary_conf_var,
+            width=6,
+            command=self._set_dirty,
+        ).grid(row=13, column=1, sticky="w", padx=8)
+
+        ttk.Label(tab3, text="Dominant source").grid(
+            row=14, column=0, sticky="w", padx=8, pady=(8, 0)
+        )
+        self.dominant_source_var = tk.StringVar(value="confidence")
+        ttk.Combobox(
+            tab3,
+            values=["confidence", "motion", "static"],
+            textvariable=self.dominant_source_var,
+            state="readonly",
+        ).grid(row=14, column=1, sticky="w", padx=8, pady=(8, 0))
         self.dominant_source_var.trace_add("write", lambda *a: self._set_dirty())
 
         # TAB 4: Tracking
@@ -1099,13 +1188,20 @@ class SettingsEditorApp(tk.Tk):
             float(d.get("secondary_conf_thresh", fallback="0.5"))
         )
         self.dominant_source_var.set(d.get("dominant_source", fallback="confidence"))
-
         # tracking
         self.match_distance_var.set(int(d.get("match_distance_thresh", fallback="200")))
         self.delete_after_var.set(int(d.get("delete_after_missed", fallback="5")))
         self.centroid_merge_var.set(int(d.get("centroid_merge_thresh", fallback="50")))
         self.iou_var.set(float(d.get("iou_thresh", fallback="0.4")))
-
+        self.secondary_epochs_var.set(int(d.get("secondary_epochs", fallback="100")))
+        # NEW: external static models (blank = use default trained best.pt)
+        self.primary_static_ext_var.set(
+            d.get("primary_static_external_model", fallback="")
+        )
+        self.secondary_static_ext_var.set(
+            d.get("secondary_static_external_model", fallback="")
+        )
+        self.use_ncnn_var.set(self._str_to_bool(d.get("use_ncnn", fallback="false")))
         if "kalman" in self.cfg:
             ksec = self.cfg["kalman"]
             self.kalman_pos_var.set(
@@ -1456,6 +1552,10 @@ class SettingsEditorApp(tk.Tk):
         new_default["use_ncnn"] = str(self.use_ncnn_var.get()).lower()
         new_default["primary_conf_thresh"] = str(self.primary_conf_var.get())
         new_default["secondary_conf_thresh"] = str(self.secondary_conf_var.get())
+        new_default["primary_static_external_model"] = self.primary_static_ext_var.get()
+        new_default["secondary_static_external_model"] = (
+            self.secondary_static_ext_var.get()
+        )
 
         # tracking
         new_default["match_distance_thresh"] = str(self.match_distance_var.get())
