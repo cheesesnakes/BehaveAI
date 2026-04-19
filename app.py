@@ -492,6 +492,8 @@ def main():
     - No arguments: Launch the GUI application.
     - "list-projects": Print the list of existing projects to stdout and exit.
     - "annotate <project_name> <file_name>": Run the annotation script for the specified project
+    - "regenerate <project_name>": Regenerate annotations for the specified project.
+    - "splice <project_name>": Run the splicing script for the specified project.
     - "inspect <project_name> <file_name>": Run the dataset inspection script for the specified project.
     - "classify <project_name>": Run the training and classification script for the specified project.
     - "live <project_name>": Run the live classification script for the specified project.
@@ -507,6 +509,13 @@ def main():
     annotate_parser.add_argument(
         "--file_name", help="Name of the file to annotate", required=False
     )
+    regenerate_parser = subparsers.add_parser(
+        "regenerate", help="Regenerate annotations for a project"
+    )
+    regenerate_parser.add_argument("project_name", help="Name of the project")
+    splice_parser = subparsers.add_parser(  # noqa: F841
+        "splice", help="Run splicing script to create clips for a project"
+    )
     inspect_parser = subparsers.add_parser(
         "inspect", help="Run dataset inspection script"
     )
@@ -520,7 +529,7 @@ def main():
     settings_parser = subparsers.add_parser("settings", help="Run settings GUI")
     settings_parser.add_argument("project_name", help="Name of the project")
 
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
 
     if args.command == "list-projects":
         # List existing projects and exit
@@ -535,7 +544,15 @@ def main():
             return
         print("\n".join(projects))
         return
-    elif args.command in ("annotate", "inspect", "classify", "live", "settings"):
+    elif args.command in (
+        "annotate",
+        "inspect",
+        "classify",
+        "live",
+        "settings",
+        "regenerate",
+        "splice",
+    ):
         # Run the specified script for the given project
         script_map = {
             "annotate": "scripts/annotation.py",
@@ -543,6 +560,8 @@ def main():
             "classify": "scripts/classify_track.py",
             "live": "scripts/live.py",
             "settings": "scripts/settings_gui.py",
+            "regenerate": "scripts/regenerate_annotations.py",
+            "splice": "scripts/splice_clips.py",
         }
         script_name = script_map[args.command]
         project_path = Path(os.getcwd()) / "projects" / args.project_name
@@ -553,11 +572,19 @@ def main():
         env["PYTHONUNBUFFERED"] = "1"
         env["BEHAVEAI_PROJECT"] = str(project_path)
         try:
-            subprocess.run(
-                [sys.executable, "-u", script_name, str(project_path)],
-                env=env,
-                check=True,
-            )
+            if unknown:
+                # Pass unknown args to the script
+                subprocess.run(
+                    [sys.executable, "-u", script_name, str(project_path)] + unknown,
+                    env=env,
+                    check=True,
+                )
+            else:
+                subprocess.run(
+                    [sys.executable, "-u", script_name, str(project_path)],
+                    env=env,
+                    check=True,
+                )
         except subprocess.CalledProcessError as e:
             print(f"Script exited with code {e.returncode}")
         except Exception as e:
