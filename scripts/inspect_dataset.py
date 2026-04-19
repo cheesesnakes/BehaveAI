@@ -165,6 +165,224 @@ annotation_index = AnnotationIndex(
 
 # ~ items = list_images_labels_and_masks()
 items = annotation_index.list_images_labels_and_masks()
+
+
+# ============================================================================
+# Training-readiness summary
+# ----------------------------------------------------------------------------
+# Report how classify_track.train_models() will see the annotation set right
+# now. Only the TRAIN split counts toward the training thresholds — val
+# images are reserved for evaluation (see count_images_in_dataset in
+# classify_track.py). We print one line per model classify_track can train:
+#
+#   * Primary static    — YAML points at annot_static/images/train/*
+#   * Primary motion    — YAML points at annot_motion/images/train/*
+#   * Secondary static  — annot_static_crop/<primary>/<secondary>/*  (per primary)
+#   * Secondary motion  — annot_motion_crop/<primary>/<secondary>/*  (per primary)
+#
+# Thresholds mirror classify_track: 5 images for primary, 2 images for
+# secondary. A model below its threshold will be silently skipped during
+# training — the summary flags these so the user isn't surprised.
+# ============================================================================
+
+_IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
+_PRIMARY_MIN_IMAGES = 5  # matches classify_track.maybe_retrain first-time-train gate
+_SECONDARY_MIN_IMAGES = 2  # matches classify_track.train_models per-class gate
+
+
+def _list_images(directory):
+    """Return a list of image filenames (not paths) in `directory`, flat."""
+    if not directory or not os.path.isdir(directory):
+        return []
+    return [f for f in os.listdir(directory) if f.lower().endswith(_IMG_EXTS)]
+
+
+def _videos_from_filenames(filenames):
+    """
+    Extract the set of video labels that contributed these image filenames.
+    Annotation filenames follow the convention `<video_label>_<frame>.jpg`
+    where <video_label> may itself contain underscores, so we split on the
+    LAST underscore and treat the tail as a frame number. Same rule as
+    annotation.build_annot_index_map.
+    """
+    videos = set()
+    for f in filenames:
+        base = os.path.splitext(f)[0]
+        if "_" not in base:
+            continue
+        vlabel, tail = base.rsplit("_", 1)
+        try:
+            int(tail)
+        except ValueError:
+            continue
+        videos.add(vlabel)
+    return videos
+
+
+def _count_secondary_tree(base_dir, primary_class):
+    """
+    For a given primary class, walk annot_*_crop/<primary>/<secondary>/
+    and collect all image files across every secondary subclass.
+    Returns (total_images, video_labels_set, per_secondary_dict).
+    """
+    per_secondary = {}
+    all_images = []
+    class_root = os.path.join(base_dir, primary_class) if base_dir else ""
+    if not class_root or not os.path.isdir(class_root):
+        return 0, set(), per_secondary
+
+    for sec in sorted(os.listdir(class_root)):
+        sec_dir = os.path.join(class_root, sec)
+        if not os.path.isdir(sec_dir):
+            continue
+        sec_imgs = _list_images(sec_dir)
+        per_secondary[sec] = len(sec_imgs)
+        all_images.extend(sec_imgs)
+
+    # Crops follow the filename convention <video>_<frame>_<x>_<y>.jpg, so
+    # we need to strip the trailing _<x>_<y> before extracting the video
+    # label. Easiest: split off the last TWO underscore-separated tails.
+    video_labels = set()
+    for f in all_images:
+        base = os.path.splitext(f)[0]
+        parts = base.rsplit("_", 2)  # -> [video_frame, x, y]
+        if len(parts) < 3:
+            continue
+        video_frame = parts[0]
+        # video_frame is still "<video>_<frame>" — strip the frame the same
+        # way as primary files.
+        if "_" not in video_frame:
+            continue
+        vlabel, tail = video_frame.rsplit("_", 1)
+        try:
+            int(tail)
+        except ValueError:
+            continue
+        video_labels.add(vlabel)
+
+    return len(all_images), video_labels, per_secondary
+
+
+def _report_primary(name, train_dir, val_dir, min_images):
+    """Print one block for a primary detector."""
+    train_files = _list_images(train_dir)
+    val_files = _list_images(val_dir)
+    train_videos = _videos_from_filenames(train_files)
+    val_videos = _videos_from_filenames(val_files)
+
+    n_train = len(train_files)
+    n_val = len(val_files)
+    status = (
+        "READY" if n_train >= min_images else f"BELOW THRESHOLD (need {min_images})"
+    )
+
+    print(f"  {name}:")
+    print(f"    train:  {n_train:>4} images from {len(train_videos):>3} videos")
+    print(f"    val:    {n_val:>4} images from {len(val_videos):>3} videos")
+    print(f"    status: {status}")
+
+
+def _report_secondary(name, crop_base_dir, primaries, ignore, min_images):
+    """Print one block covering all per-primary-class secondary classifiers."""
+    print(f"  {name}:")
+    if not crop_base_dir or not os.path.isdir(crop_base_dir):
+        print(f"    (no crop dir at {crop_base_dir or '<unset>'})")
+        return
+
+    any_class = False
+    for primary_class in primaries:
+        if primary_class in ignore:
+            continue
+        class_root = os.path.join(crop_base_dir, primary_class)
+        if not os.path.isdir(class_root):
+            continue
+
+        any_class = True
+        n_images, videos, per_sec = _count_secondary_tree(crop_base_dir, primary_class)
+        status = (
+            "READY"
+            if n_images >= min_images
+            else f"BELOW THRESHOLD (need {min_images})"
+        )
+
+        # Format per-secondary breakdown inline if there are multiple classes.
+        if per_sec:
+            breakdown = ", ".join(f"{k}={v}" for k, v in per_sec.items())
+        else:
+            breakdown = "(no subclass dirs)"
+        print(
+            f"    [{primary_class}] {n_images:>4} images from "
+            f"{len(videos):>3} videos — {status}"
+        )
+        print(f"        subclasses: {breakdown}")
+
+    if not any_class:
+        print("    (no class subdirectories found)")
+
+
+def print_training_readiness_summary():
+    """
+    Print the per-model view of what classify_track.train_models() will do
+    with the current annotation set. Intended to run once at startup.
+    """
+    print()
+    print("=" * 72)
+    print("Training-readiness summary (as classify_track.train_models will see it)")
+    print("=" * 72)
+
+    # Primary models
+    if primary_static_classes and primary_static_classes[0] != "0":
+        _report_primary(
+            "Primary static",
+            static_train_images_dir,
+            static_val_images_dir,
+            _PRIMARY_MIN_IMAGES,
+        )
+    else:
+        print("  Primary static:  (not configured)")
+
+    primary_motion_classes = params.get("primary_motion_classes", [])
+    if primary_motion_classes and primary_motion_classes[0] != "0":
+        _report_primary(
+            "Primary motion",
+            motion_train_images_dir,
+            motion_val_images_dir,
+            _PRIMARY_MIN_IMAGES,
+        )
+    else:
+        print("  Primary motion:  (not configured)")
+
+    # Secondary (hierarchical-only)
+    if hierarchical_mode:
+        secondary_static_classes = params.get("secondary_static_classes", [])
+        secondary_motion_classes = params.get("secondary_motion_classes", [])
+
+        if len(secondary_static_classes) >= 2:
+            _report_secondary(
+                "Secondary static (per primary class)",
+                static_cropped_base_dir,
+                primary_classes,
+                ignore_secondary,
+                _SECONDARY_MIN_IMAGES,
+            )
+
+        if len(secondary_motion_classes) >= 2:
+            _report_secondary(
+                "Secondary motion (per primary class)",
+                motion_cropped_base_dir,
+                primary_classes,
+                ignore_secondary,
+                _SECONDARY_MIN_IMAGES,
+            )
+    else:
+        print("  Secondary models: (hierarchical mode off — not applicable)")
+
+    print("=" * 72)
+    print()
+
+
+print_training_readiness_summary()
+
 if not items:
     print("No annotated images found in the expected dataset directories.")
     print(
