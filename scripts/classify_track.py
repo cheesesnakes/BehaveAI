@@ -1,10 +1,42 @@
+"""
+classify_track.py
+=================
+
+Batch pipeline that takes every video in the project's `input/` folder and
+produces two artefacts per video into `output/`:
+
+    <n>_detected.mp4   — annotated video with boxes, labels, tracks
+    <n>_tracking.csv   — per-frame, per-track class + confidence dump
+
+The pipeline has five conceptual stages:
+
+    1. Train-or-verify models     (train_models)
+    2. Load primary models        (inside process_video, per video)
+    3. Per-frame detection loop   (motion image → YOLO → merge)
+    4. Secondary classification   (hierarchical crops → classifier YOLO)
+    5. Tracking + rendering       (Kalman tracker → overlays → CSV/MP4)
+
+Missing-model handling
+----------------------
+Primary and secondary model weights are only produced if training has enough
+annotations to run. When weights are absent:
+
+    * primary static/motion:   the stream is skipped for every video; other
+                               streams keep running; a video is skipped only
+                               if BOTH primary models are missing.
+    * secondary classifiers:   the per-class key is absent from the dict, so
+                               the runtime lookup falls through to primary
+                               class only (secondary_* columns default to
+                               primary class with conf=1.0).
+
+This lets classification run as soon as any one model trains, instead of
+requiring the full stack.
+"""
+
 import csv
 import glob
 import os
 import shutil
-
-# ~ import config_watcher
-import sys
 import time
 import tkinter as tk
 from tkinter import messagebox
@@ -15,23 +47,31 @@ from load_configs import load_params
 from scipy.optimize import linear_sum_assignment
 from ultralytics import YOLO
 
+# Load all config into a single dict. See load_configs.py for keys.
 params = load_params()
 
-# --- NCNN helper utilities -----------------------
+
+# ============================================================================
+# STAGE 0a — NCNN export/load helpers
+# ----------------------------------------------------------------------------
+# NCNN is a portable inference runtime optimised for CPU / edge devices (e.g.
+# Raspberry Pi). Ultralytics can export a .pt model to an NCNN folder of
+# .param + .bin files. These helpers (a) check/produce that folder, and
+# (b) load it, with graceful fallback to the original .pt on any failure.
+# ============================================================================
 
 
 def ncnn_dir_for_weights(weights_path):
     """Return the expected NCNN export directory for a given .pt path."""
-    base, ext = os.path.splitext(weights_path)
-    # Ultralytics export typically creates a folder named like "<base>_ncnn_model"
+    base, _ext = os.path.splitext(weights_path)
+    # Ultralytics export creates a folder named "<base>_ncnn_model".
     return base + "_ncnn_model"
 
 
 def ncnn_files_exist(ncnn_dir):
-    """Return True if NCNN param+bin appear to exist in the export dir."""
+    """Return True if NCNN .param and .bin files appear to exist in the dir."""
     if not os.path.isdir(ncnn_dir):
         return False
-    # Look for .param and .bin files (ncnn export creates *.param and *.bin)
     has_param = any(f.endswith(".param") for f in os.listdir(ncnn_dir))
     has_bin = any(f.endswith(".bin") for f in os.listdir(ncnn_dir))
     return has_param and has_bin
@@ -39,9 +79,9 @@ def ncnn_files_exist(ncnn_dir):
 
 def ensure_ncnn_export(weights_path, task, timeout=300):
     """
-    Ensure an NCNN conversion exists for weights_path.
-    Returns the ncnn_dir on success, None on failure (falls back to .pt).
-    This will skip conversion if the ncnn folder already exists.
+    Ensure an NCNN conversion exists for `weights_path`.
+    Returns the ncnn_dir on success, or None on failure (caller falls back to .pt).
+    Skips conversion if the NCNN folder already exists.
     """
     ncnn_dir = ncnn_dir_for_weights(weights_path)
     if ncnn_files_exist(ncnn_dir):
@@ -50,32 +90,30 @@ def ensure_ncnn_export(weights_path, task, timeout=300):
     try:
         print(f"Exporting {weights_path} -> NCNN (this may take a while)...")
         model = YOLO(weights_path, task=task)
-        # Use Ultralytics export API. This creates the folder "<base>_ncnn_model".
-        # Some installs can be slow; we try and catch errors below.
+        # Triggers "<base>_ncnn_model" folder creation.
         model.export(format="ncnn")
-        # Wait a short time for files to appear (export is synchronous in most versions).
+        # Poll for the output folder — export is usually synchronous but
+        # we guard against slow filesystems.
         start = time.time()
         while time.time() - start < timeout:
             if ncnn_files_exist(ncnn_dir):
                 print(f"NCNN export complete: {ncnn_dir}")
                 return ncnn_dir
             time.sleep(0.5)
-        # timed out
         print(f"NCNN export timeout for {weights_path}")
         return None
     except Exception as e:
-        # Don't crash — export can fail on some systems; print useful debugging info and return None
+        # Don't crash the whole run — caller will fall back to .pt.
         print(f"Warning: NCNN export failed for {weights_path}: {e}")
         return None
 
 
 def load_model_with_ncnn_preference(weights_path, task):
     """
-    Attempt to use NCNN if available (or convert it). If conversion or loading fails,
-    fall back to the original PyTorch .pt path.
-    Returns a YOLO model instance (which may wrap NCNN or .pt).
+    Prefer NCNN if available (or convert once). On any failure, fall back
+    to the original PyTorch .pt path. Returns a YOLO instance.
     """
-    # If a .pt was not provided (maybe already a folder), just try loading directly
+    # If caller passed a folder instead of a .pt, just try loading directly.
     if not weights_path.endswith(".pt"):
         try:
             return YOLO(weights_path, task=task)
@@ -84,7 +122,8 @@ def load_model_with_ncnn_preference(weights_path, task):
             raise
 
     ncnn_dir = ncnn_dir_for_weights(weights_path)
-    # prefer existing NCNN dir if present
+
+    # Path 1: NCNN folder already exists — use it.
     if ncnn_files_exist(ncnn_dir):
         try:
             print(f"Loading NCNN model from {ncnn_dir}")
@@ -92,7 +131,7 @@ def load_model_with_ncnn_preference(weights_path, task):
         except Exception as e:
             print(f"Failed to load NCNN model at {ncnn_dir}: {e} (falling back to .pt)")
 
-    # Otherwise attempt conversion (one-time). If it fails, fall back to .pt.
+    # Path 2: convert .pt -> NCNN once, then load.
     exported = ensure_ncnn_export(weights_path, task)
     if exported:
         try:
@@ -102,12 +141,21 @@ def load_model_with_ncnn_preference(weights_path, task):
                 f"Failed to load NCNN-exported model {exported}: {e} (falling back to .pt)"
             )
 
-    # Finally, fallback to direct .pt load
+    # Path 3: original PyTorch weights.
     print(f"Using original weights (PyTorch) at {weights_path}")
     return YOLO(weights_path, task=task)
 
 
-# --------------------------------------------------------------------
+# ============================================================================
+# STAGE 0b — Training output relocation
+# ----------------------------------------------------------------------------
+# Ultralytics sometimes writes training outputs to its own `runs/detect/...`
+# folder regardless of the `project=` argument. This helper finds the most
+# recent best.pt anywhere plausible and moves its containing run directory
+# into the canonical location the rest of the code expects:
+#
+#     <project_path>/<run_name>/weights/best.pt
+# ============================================================================
 
 
 def move_to_expected(project_path, run_name="train", runs_root="runs"):
@@ -115,13 +163,13 @@ def move_to_expected(project_path, run_name="train", runs_root="runs"):
     Locate the most recently written best.pt anywhere Ultralytics might have
     put it, and relocate its parent run directory into project_path/run_name.
     """
+    # Fast path: weights already in the expected location.
     expected_weights = os.path.join(project_path, run_name, "weights", "best.pt")
     if os.path.exists(expected_weights):
-        # Already in the right place, nothing to do.
         return os.path.join(project_path, run_name)
 
-    # Search broadly for best.pt files, excluding the project_path itself
-    # (in case of a partial previous move) and any *_backup dirs.
+    # Broad search — exclude project_path itself (previous partial move) and
+    # any *_backup dirs.
     search_roots = [runs_root, "../../runs", "."]
     candidates = []
     for root in search_roots:
@@ -131,7 +179,6 @@ def move_to_expected(project_path, run_name="train", runs_root="runs"):
             os.path.join(root, "**", "weights", "best.pt"), recursive=True
         ):
             abs_path = os.path.abspath(path)
-            # Skip anything already inside project_path or a backup
             if os.path.abspath(project_path) in abs_path:
                 continue
             if "_backup" in abs_path:
@@ -139,16 +186,16 @@ def move_to_expected(project_path, run_name="train", runs_root="runs"):
             candidates.append(abs_path)
 
     if not candidates:
-        # raise exception
         raise FileNotFoundError(
-            f"Could not find 'best.pt' after training. Searched in '{search_roots}' and current directory, excluding '{project_path}' and backups."
+            f"Could not find 'best.pt' after training. Searched in '{search_roots}' "
+            f"and current directory, excluding '{project_path}' and backups."
         )
 
-    # Most recently modified wins
+    # Most recently modified wins.
     candidates.sort(key=os.path.getmtime, reverse=True)
     best_pt = candidates[0]
 
-    # The run directory is two levels up from best.pt: <run_dir>/weights/best.pt
+    # The run dir is two levels up from best.pt: <run_dir>/weights/best.pt
     src_run_dir = os.path.dirname(os.path.dirname(best_pt))
     dst_run_dir = os.path.join(project_path, run_name)
 
@@ -159,7 +206,7 @@ def move_to_expected(project_path, run_name="train", runs_root="runs"):
         shutil.move(src_run_dir, dst_run_dir)
         print(f"Moved YOLO training output: '{src_run_dir}' -> '{dst_run_dir}'")
 
-        # Best-effort cleanup of now-empty ancestor dirs under runs_root
+        # Cleanup: remove now-empty ancestor dirs under runs_root.
         runs_root_abs = os.path.abspath(runs_root)
         parent = os.path.abspath(os.path.dirname(src_run_dir))
         while parent.startswith(runs_root_abs) and parent != runs_root_abs:
@@ -178,19 +225,34 @@ def move_to_expected(project_path, run_name="train", runs_root="runs"):
         return None
 
 
-# ~ # check whether settings have been changed, and motion annotation library needs rebuilding
-# ~ settings_changed = config_watcher.check_settings_changed(current_config_path=config_path, saved_config_path=None, model_dirs=['model_primary_motion'])
-# ~ # Globals for prompting/behaviour inside maybe_retrain
-# ~ regen_prompt_shown = False
-# ~ force_rebuild_motion = False
+# Global used by interactive retrain prompts (legacy; kept for compatibility).
+global_response = 0
 
 
-global_response = 0  # if 'yes' is selected for any model re-training, retraining should be perfoemd for all models
+# ============================================================================
+# STAGE 1 — Training or verifying models
+# ----------------------------------------------------------------------------
+# Before any video processing, walk every configured model and make sure its
+# weights are on disk. count_images_in_dataset() answers "do we have enough
+# training data?", maybe_retrain() either trains from scratch, fine-tunes from
+# existing weights, or silently skips if data is insufficient.
+#
+# Minimum-image policy:
+#   * Primary models:   at least  5 images required  (in maybe_retrain).
+#   * Secondary models: at least  2 images required  (in train_models).
+# A model that fails to train leaves its best.pt absent — downstream code
+# detects this at load time and skips that stream for inference.
+# ============================================================================
 
 
 def count_images_in_dataset(path):
-    ## Count images in a dataset, handling both YAML-based and directory-based datasets
-    # If path is a YAML file (primary models)
+    """
+    Count images in a training dataset.
+      * YAML path   -> read the `train:` key, count files there
+      * directory   -> recursive, count image files in leaf dirs only
+    Returns 0 on any error.
+    """
+    # Primary-model case: YAML descriptor pointing at images/train
     if path.endswith(".yaml"):
         try:
             import yaml
@@ -198,18 +260,16 @@ def count_images_in_dataset(path):
             with open(path, "r") as f:
                 data = yaml.safe_load(f)
 
-            # Get the path to the training images
             train_path = data["train"]
             base_dir = os.path.dirname(path)
             abs_train_path = os.path.join(base_dir, train_path)
 
-            # Handle different dataset formats
             if abs_train_path.endswith(".txt"):
-                # Text file with image paths
+                # List-of-paths format.
                 with open(abs_train_path, "r") as f:
                     return len(f.readlines())
             else:
-                # Directory with images
+                # Directory full of image files.
                 image_exts = [".jpg", ".jpeg", ".png", ".bmp", ".tiff"]
                 return len(
                     [
@@ -222,20 +282,15 @@ def count_images_in_dataset(path):
             print(f"Error counting images: {e}")
             return 0
 
-    # If path is a directory (secondary models)
+    # Secondary-model case: class-folder tree.
     elif os.path.isdir(path):
         total_count = 0
         image_exts = [".jpg", ".jpeg", ".png", ".bmp", ".tiff"]
-
-        # Walk through all subdirectories
         for root, dirs, files in os.walk(path):
-            # Only count files in leaf directories (class directories)
-            if not dirs:  # This is a leaf directory (no subdirectories)
-                count = sum(
+            if not dirs:  # leaf class directory
+                total_count += sum(
                     1 for f in files if os.path.splitext(f)[1].lower() in image_exts
                 )
-                total_count += count
-
         return total_count
 
     else:
@@ -248,14 +303,19 @@ def maybe_retrain(
 ):
     """
     Decide whether to (re)train a model based on existence and image counts.
-    - If model_path exists and the recorded train_count differs from the current dataset,
-      prompt the user to retrain (Yes/No).
-    - If model_path does not exist, perform first-time training.
-    Returns True if a training run was performed, False otherwise.
-    """
 
-    # If model exists: compare recorded image count (train_count.txt) with current dataset
+      * model_path exists + count changed -> prompt user; on 'yes', backup
+        old model_dir to <project>_backup<N>, fine-tune from the backup's
+        best.pt, and move the new run into place.
+      * model_path missing                -> first-time train, but only if
+        the dataset has at least 5 images.
+      * count unchanged                   -> no-op.
+
+    Returns True if training ran, False otherwise.
+    """
+    # ---- branch A: model already exists -------------------------------
     if os.path.exists(model_path):
+        # Load the last-trained image count (or -1 if unknown).
         if os.path.exists(os.path.join(project_path, "train_count.txt")):
             try:
                 with open(os.path.join(project_path, "train_count.txt"), "r") as f:
@@ -267,8 +327,8 @@ def maybe_retrain(
 
         current_count = count_images_in_dataset(yaml_path)
 
+        # If the count changed, ask the user whether to retrain.
         if current_count != last_count:
-            # Ask user whether to retrain
             root = tk.Tk()
             root.withdraw()
             msg = (
@@ -280,7 +340,7 @@ def maybe_retrain(
             root.destroy()
 
             if response:
-                # Backup existing model dir/project and retrain from its weights
+                # Backup the whole model dir so we never lose old weights.
                 backup_dir = project_path + "_backup"
                 i = 1
                 while os.path.exists(f"{backup_dir}{i}"):
@@ -292,6 +352,7 @@ def maybe_retrain(
                 except Exception as e:
                     print(f"Warning: failed to backup {project_path}: {e}")
 
+                # Fine-tune from the backed-up weights.
                 start_weights = os.path.join(
                     final_backup, "train", "weights", "best.pt"
                 )
@@ -311,12 +372,11 @@ def maybe_retrain(
                     print(f"Error: {e}")
 
                 print(f"Done training {model_type} model")
-                # Update saved train count
+
+                # Record count + snapshot of settings used.
                 with open(os.path.join(project_path, "train_count.txt"), "w") as f:
                     f.write(str(current_count))
-                # copy existing settings ini file for reference (so you know which settings were used for each model)
                 os.makedirs(project_path, exist_ok=True)
-                # ~ dst = os.path.join(project_path, os.path.basename(config_path))
                 dst = os.path.join(project_path, "saved_settings.ini")
                 try:
                     shutil.copy2(params["config_path"], dst)
@@ -325,16 +385,18 @@ def maybe_retrain(
                     print(f"Warning: could not copy settings to model dir: {e}")
                 return True
 
-        # else counts match -> nothing to do
+        # Counts match -> nothing to do.
         return False
 
+    # ---- branch B: first-time training --------------------------------
     else:
-        # Model missing -> do first-time training
         print(f"{model_type} model not found, building it...")
         current_count = count_images_in_dataset(yaml_path)
         if current_count < 5:
+            # Not enough data. Leave best.pt absent; caller handles skip.
             print(
-                f"Error: Not enough images to train {model_type} model (found {current_count}, need at least 5)."
+                f"Error: Not enough images to train {model_type} model "
+                f"(found {current_count}, need at least 5)."
             )
             return False
 
@@ -354,14 +416,12 @@ def maybe_retrain(
 
         print(f"Done training {model_type} model")
 
+        # Record count + snapshot of settings used.
         current_count = count_images_in_dataset(yaml_path)
         os.makedirs(project_path, exist_ok=True)
         with open(os.path.join(project_path, "train_count.txt"), "w") as f:
             f.write(str(current_count))
-
-        # copy existing settings ini file for reference (so you know which settings were used for each model)
         os.makedirs(project_path, exist_ok=True)
-        # ~ dst = os.path.join(project_path, os.path.basename(config_path))
         dst = os.path.join(project_path, "saved_settings.ini")
         try:
             shutil.copy2(params["config_path"], dst)
@@ -373,15 +433,27 @@ def maybe_retrain(
 
 
 def train_models():
+    """
+    Walk the configured model hierarchy and ensure each has weights on disk
+    (or leave it absent if there isn't enough annotation data). Populates two
+    global dicts used later at inference time:
 
-    global secondary_static_models, secondary_motion_models, static_class_map, motion_class_map
+        secondary_static_models[primary_class] = YOLO instance
+        secondary_motion_models[primary_class] = YOLO instance
 
-    # Train secondary classifiers for each static class
+    Keys are only set for classes whose secondary model was successfully
+    trained AND loaded. Missing keys are handled naturally by `.get(..., None)`
+    at inference time.
+    """
+    global secondary_static_models, secondary_motion_models
+    global static_class_map, motion_class_map
 
     secondary_static_models = None
     secondary_motion_models = None
 
+    # ---- hierarchical (secondary) models ------------------------------
     if params["hierarchical_mode"]:
+        # Secondary STATIC classifiers — one YOLO-cls model per primary class.
         secondary_static_models = {}
         static_class_map = [
             [None] * len(params["secondary_classes"])
@@ -391,28 +463,29 @@ def train_models():
             for primary_class in params["primary_classes"]:
                 idx = params["primary_classes"].index(primary_class)
                 hotkey = params["primary_hotkeys"][idx]
+
+                # Skip primaries that are themselves in the secondary set, or
+                # in the ignore list, or have no annotation data on disk.
                 if hotkey in params["secondary_hotkeys"]:
                     continue
-
                 if primary_class in params["ignore_secondary"]:
                     continue
-
                 data_dir = os.path.join(
                     params["secondary_static_data_path"], primary_class
                 )
-                # Skip if directory doesn't exist
                 if not os.path.isdir(data_dir):
                     continue
 
-                # Create model directory for this static class
                 model_dir = f"models/model_static_static_{primary_class}"
                 weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
 
+                # Not enough annotations -> leave weights absent, skip load.
                 n_image = count_images_in_dataset(data_dir)
-
                 if n_image < 2:
                     print(
-                        f"Error: Not enough images to train secondary motion model for primary class '{primary_class}' (found {n_image}, need at least 2). Skipping this secondary model."
+                        f"Error: Not enough images to train secondary static model "
+                        f"for primary class '{primary_class}' (found {n_image}, "
+                        f"need at least 2). Skipping this secondary model."
                     )
                     continue
 
@@ -426,18 +499,30 @@ def train_models():
                     224,
                 )
 
-                # Load the trained model
-                if params["use_ncnn"] == "true":
-                    secondary_static_models[primary_class] = (
-                        load_model_with_ncnn_preference(weights_path, "classify")
-                    )
+                # Load only if weights actually exist. maybe_retrain can
+                # silently skip when first-time training isn't allowed.
+                if os.path.isfile(weights_path):
+                    try:
+                        if params["use_ncnn"] == "true":
+                            secondary_static_models[primary_class] = (
+                                load_model_with_ncnn_preference(
+                                    weights_path, "classify"
+                                )
+                            )
+                        else:
+                            secondary_static_models[primary_class] = YOLO(weights_path)
+                    except Exception as e:
+                        print(
+                            f"Warning: failed to load secondary static model for "
+                            f"'{primary_class}': {e} — skipping at inference."
+                        )
                 else:
-                    secondary_static_models[primary_class] = YOLO(weights_path)
+                    print(
+                        f"Secondary static model for '{primary_class}' has no "
+                        f"weights at {weights_path} — skipping at inference."
+                    )
 
-            # ~ print(f"secondary_static_models {secondary_static_models}")
-
-        # Train secondary classifiers for each motion class
-
+        # Secondary MOTION classifiers — mirror of the static block.
         secondary_motion_models = {}
         motion_class_map = [
             [None] * len(params["secondary_classes"])
@@ -447,28 +532,26 @@ def train_models():
             for primary_class in params["primary_classes"]:
                 idx = params["primary_classes"].index(primary_class)
                 hotkey = params["primary_hotkeys"][idx]
+
                 if hotkey in params["secondary_hotkeys"]:
                     continue
-
                 if primary_class in params["ignore_secondary"]:
                     continue
-
                 data_dir = os.path.join(
                     params["secondary_motion_data_path"], primary_class
                 )
-                # Skip if directory doesn't exist
                 if not os.path.isdir(data_dir):
                     continue
 
-                # Create model directory for this static class
                 model_dir = f"models/model_secondary_motion_{primary_class}"
                 weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
 
                 n_image = count_images_in_dataset(data_dir)
-
                 if n_image < 2:
                     print(
-                        f"Error: Not enough images to train secondary motion model for primary class '{primary_class}' (found {n_image}, need at least 2). Skipping this secondary model."
+                        f"Error: Not enough images to train secondary motion model "
+                        f"for primary class '{primary_class}' (found {n_image}, "
+                        f"need at least 2). Skipping this secondary model."
                     )
                     continue
 
@@ -482,18 +565,30 @@ def train_models():
                     224,
                 )
 
-                # Load the trained model
-                if params["use_ncnn"] == "true":
-                    secondary_motion_models[primary_class] = (
-                        load_model_with_ncnn_preference(weights_path, "classify")
-                    )
+                if os.path.isfile(weights_path):
+                    try:
+                        if params["use_ncnn"] == "true":
+                            secondary_motion_models[primary_class] = (
+                                load_model_with_ncnn_preference(
+                                    weights_path, "classify"
+                                )
+                            )
+                        else:
+                            secondary_motion_models[primary_class] = YOLO(weights_path)
+                    except Exception as e:
+                        print(
+                            f"Warning: failed to load secondary motion model for "
+                            f"'{primary_class}': {e} — skipping at inference."
+                        )
                 else:
-                    secondary_motion_models[primary_class] = YOLO(weights_path)
+                    print(
+                        f"Secondary motion model for '{primary_class}' has no "
+                        f"weights at {weights_path} — skipping at inference."
+                    )
 
-            # ~ print(f"secondary_motion_models {secondary_motion_models}")
-
-    # Train primary classifiers (if not in hierarchical mode - otherwise they will be trained as part of the secondary model training, using the same data but different hotkeys)
-    # -------CHECK PRIMARY MODEL EXISTS----------
+    # ---- primary detectors --------------------------------------------
+    # These are trained AFTER the secondaries because in hierarchical mode
+    # the secondary annotations share source frames with primary annotations.
     if params["primary_static_classes"][0] != "0":
         maybe_retrain(
             "models/model_primary_static",
@@ -517,7 +612,13 @@ def train_models():
         )
 
 
-# iou function that returns the larger proportional overlap of box1 and box2, relative to their own areas. This way if one box is entirely inside another, it will return 1.0, rather than a smaller value as with traditional iou.
+# ============================================================================
+# STAGE 5a — IoU helper
+# ----------------------------------------------------------------------------
+# Not traditional IoU. Returns the *larger* proportional overlap relative to
+# each box's own area, so if one box is fully inside another the score is 1.0.
+# Used when merging detections from the static and motion streams.
+# ============================================================================
 
 
 def iou(box1, box2):
@@ -530,36 +631,38 @@ def iou(box1, box2):
     area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
     prop1 = inter / area1
     prop2 = inter / area2
-    # return the larger proportional overlap - e.g. if one box is entirely inside another, this will return a 1.0, whereas the previous wouldn't
     if prop1 > prop2:
         return prop1 if prop1 > 0 else 0
     else:
         return prop2 if prop2 > 0 else 0
-    # ~ union = area1 + area2 - inter
-    # ~ return inter/union if union > 0 else 0
 
 
-# --- TRACKER CLASS -------------------------------------------------------
+# ============================================================================
+# STAGE 5b — Kalman-filter multi-object tracker
+# ----------------------------------------------------------------------------
+# Each track keeps a 4D state (x, y, vx, vy) that predicts next position.
+# Detections are matched to tracks via Hungarian assignment on Euclidean
+# distance. Unmatched detections become new tracks; unmatched tracks age and
+# eventually die.
+# ============================================================================
+
+
 class KalmanTracker:
     def __init__(self, dist_thresh, max_missed):
         self.next_id = 1
         self.tracks = {}  # tid -> {'kf': KalmanFilter, 'missed': int}
-        self.prev_positions = {}  # Track previous positions
+        self.prev_positions = {}  # tid -> last-observed (x, y)
         self.dist_thresh = dist_thresh
         self.max_missed = max_missed
 
     def _create_kf(self, initial_pt):
-
-        # Create a 4D state (x, y, vx, vy) Kalman Filter measuring (x, y).
+        # State: [x, y, vx, vy]; measurement: [x, y].
         kf = cv2.KalmanFilter(4, 2)
-        # State transition: x' = x + vx, y' = y + vy
         kf.transitionMatrix = np.array(
-            [[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=np.float32
+            [[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]],
+            dtype=np.float32,
         )
-        # Measurement: we only observe x, y
         kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
-        # Tune these covariances to your scene
-
         kf.processNoiseCov = np.diag(
             [
                 params["process_noise_pos"],
@@ -571,7 +674,6 @@ class KalmanTracker:
         kf.measurementNoiseCov = (
             np.eye(2, dtype=np.float32) * params["measurement_noise"]
         )
-        # Initialize state
         kf.statePre = np.array(
             [[initial_pt[0]], [initial_pt[1]], [0.0], [0.0]], dtype=np.float32
         )
@@ -579,10 +681,7 @@ class KalmanTracker:
         return kf
 
     def predict_all(self):
-        """
-        Predict the next position for every track.
-        Returns list of (tid, predicted_pt).
-        """
+        """Run KF predict() for every track. Returns list of (tid, (x, y))."""
         preds = []
         for tid, tr in self.tracks.items():
             pred = tr["kf"].predict()
@@ -590,37 +689,37 @@ class KalmanTracker:
         return preds
 
     def _prune_duplicate_tracks(self):
-        """
-        Merge any two tracks whose current posteriors are very close.
-        Call this at the end of update().
-        """
+        """Merge any two tracks whose posteriors are very close."""
         tids = list(self.tracks.keys())
-        posts = {}
-        for tid in tids:
-            sp = self.tracks[tid]["kf"].statePost
-            posts[tid] = (float(sp[0, 0]), float(sp[1, 0]))
+        posts = {
+            tid: (
+                float(self.tracks[tid]["kf"].statePost[0, 0]),
+                float(self.tracks[tid]["kf"].statePost[1, 0]),
+            )
+            for tid in tids
+        }
         to_drop = set()
         for i, t1 in enumerate(tids):
             x1, y1 = posts[t1]
             for t2 in tids[i + 1 :]:
                 x2, y2 = posts[t2]
                 if np.hypot(x1 - x2, y1 - y2) < self.dist_thresh * 0.5:
-                    # mark the higher ID for deletion
                     to_drop.add(max(t1, t2))
         for tid in to_drop:
             del self.tracks[tid]
 
     def update(self, detections):
-
-        # detections: list of (x, y) centroids
-        # Returns a dict: detection_index -> track_id
-
-        # 1) Predict all tracks forward one step
-        preds = self.predict_all()  # list of (tid, (px, py))
+        """
+        Main tracker step.
+          detections: list of (x, y) centroids for this frame.
+          Returns:    dict mapping detection-index -> track-id.
+        """
+        # 1) Predict every existing track forward one step.
+        preds = self.predict_all()
         track_ids = [t[0] for t in preds]
         pred_pts = [t[1] for t in preds]
 
-        # 2) Build cost matrix = Euclidean distance
+        # 2) Build cost matrix (Euclidean distance) and solve assignment.
         if pred_pts and detections:
             cost = np.zeros((len(pred_pts), len(detections)), dtype=np.float32)
             for i, p in enumerate(pred_pts):
@@ -635,7 +734,7 @@ class KalmanTracker:
         matched_tracks = set()
         matched_dets = set()
 
-        # 3) Associate tracks ↔ detections
+        # 3) Associate tracks <-> detections that are within threshold.
         for r, c in zip(row_idx, col_idx):
             if cost[r, c] < self.dist_thresh:
                 tid = track_ids[r]
@@ -643,23 +742,18 @@ class KalmanTracker:
                 matched_dets.add(c)
                 assigned_detects[c] = tid
 
-                # Get the measurement point
                 dpt = detections[c]
                 meas = np.array([[np.float32(dpt[0])], [np.float32(dpt[1])]])
 
-                # Correct KF with the detection measurement
                 self.tracks[tid]["kf"].correct(meas)
                 self.tracks[tid]["missed"] = 0
-
-                # Update previous position
                 self.prev_positions[tid] = (dpt[0], dpt[1])
 
-        # 4) Process unassigned detections
+        # 4) Unassigned detections: try nearest-track fallback, else new track.
         for i, dpt in enumerate(detections):
             if i in matched_dets:
                 continue
 
-            # try to find an existing track under the threshold
             best_tid, best_dist = None, float("inf")
             for tid, (px, py) in preds:
                 d = np.hypot(dpt[0] - px, dpt[1] - py)
@@ -667,39 +761,34 @@ class KalmanTracker:
                     best_dist, best_tid = d, tid
 
             if best_dist < self.dist_thresh:
+                # Claim this detection for the nearest track.
                 assigned_detects[i] = best_tid
                 self.tracks[best_tid]["missed"] = 0
                 meas = np.array([[np.float32(dpt[0])], [np.float32(dpt[1])]])
                 self.tracks[best_tid]["kf"].correct(meas)
-
-                # Update previous position
                 self.prev_positions[best_tid] = (dpt[0], dpt[1])
-                matched_tracks.add(best_tid)  # Add to matched tracks
-
+                matched_tracks.add(best_tid)
             else:
-                # New track
+                # Birth of a new track.
                 tid = self.next_id
                 kf = self._create_kf(dpt)
                 self.tracks[tid] = {"kf": kf, "missed": 0}
                 assigned_detects[i] = tid
-                self.prev_positions[tid] = (dpt[0], dpt[1])  # Initialize position
-                matched_tracks.add(tid)  # Add to matched tracks
+                self.prev_positions[tid] = (dpt[0], dpt[1])
+                matched_tracks.add(tid)
                 self.next_id += 1
 
-        # 5) Handle unmatched tracks
+        # 5) Age unmatched tracks; inflate uncertainty; delete if too old.
         for tid in list(self.tracks.keys()):
             if tid not in matched_tracks:
                 self.tracks[tid]["missed"] += 1
-                # Increase uncertainty when missing detections
                 noise_scale = min(2.0, 1.0 + self.tracks[tid]["missed"] * 0.2)
 
-                # FIXED: Preserve matrix type and structure
                 kf = self.tracks[tid]["kf"]
                 new_noise = kf.processNoiseCov.copy()
                 new_noise *= noise_scale
                 kf.processNoiseCov = new_noise
 
-                # Remove track if missed too many times
                 if self.tracks[tid]["missed"] > self.max_missed:
                     del self.tracks[tid]
                     if tid in self.prev_positions:
@@ -708,8 +797,23 @@ class KalmanTracker:
         return assigned_detects
 
 
-# --- MAIN PROCESSING -----------------------------------------------------
+# ============================================================================
+# STAGE 2–5 — Per-video pipeline
+# ----------------------------------------------------------------------------
+# process_video() runs the end-to-end pipeline on one file:
+#   * opens video + output writers (MP4 + CSV)
+#   * loads whichever primary models have trained weights on disk
+#   * for each frame: build motion image, run detection(s), merge, run
+#     secondary classification, track, draw, and write a CSV row per track.
+#
+# The model-load section below is defensive: a missing best.pt just means the
+# corresponding stream is skipped for this video. If both primary models are
+# missing the whole video is skipped cleanly.
+# ============================================================================
+
+
 def process_video(file):
+    # ---- STAGE 2a: open inputs and outputs ----------------------------
     os.makedirs(params["output_folder"], exist_ok=True)
     base = os.path.splitext(os.path.basename(file))[0]
     cap = cv2.VideoCapture(file)
@@ -726,38 +830,72 @@ def process_video(file):
         (w, h),
     )
 
+    # ---- STAGE 2b: defensively load primary models --------------------
+    # For each stream, three things must be true to load:
+    #   (1) the stream is configured in the INI (classes[0] != "0")
+    #   (2) the best.pt file exists on disk
+    #   (3) YOLO/NCNN can actually open it
+    # If any fails, the model stays None and the per-frame detection block
+    # below is silently skipped for that stream.
+    model_static = None
+    model_motion = None
+
+    # Primary STATIC
     if params["primary_static_classes"][0] != "0":
-        if params["use_ncnn"] == "true":
-            model_static = load_model_with_ncnn_preference(
-                params["primary_static_model_path"], "detect"
-            )
+        weights = params["primary_static_model_path"]  # already ends in best.pt
+        if os.path.isfile(weights):
+            try:
+                if params["use_ncnn"] == "true":
+                    model_static = load_model_with_ncnn_preference(weights, "detect")
+                else:
+                    model_static = YOLO(weights)
+            except Exception as e:
+                print(f"Warning: failed to load primary static model ({weights}): {e}")
+                print("  -> skipping primary static stream for this video")
+                model_static = None
         else:
-            if os.path.isfile(params["primary_static_model_path"] + "/best.pt"):
-                model_static = YOLO(params["primary_static_model_path"])
-            else:
-                print(
-                    "Primary static model not trained, likely due to insufficient annotations. Please add more training images and re-train the model."
-                )
-                sys.exit(1)
+            print(f"Primary static model not trained (no {weights})")
+            print("  -> skipping primary static stream for this video")
 
+    # Primary MOTION
     if params["primary_motion_classes"][0] != "0":
-        if params["use_ncnn"] == "true":
-            model_motion = load_model_with_ncnn_preference(
-                params["primary_motion_model_path"], "detect"
-            )
+        weights = params["primary_motion_model_path"]  # already ends in best.pt
+        if os.path.isfile(weights):
+            try:
+                if params["use_ncnn"] == "true":
+                    model_motion = load_model_with_ncnn_preference(weights, "detect")
+                else:
+                    model_motion = YOLO(weights)
+            except Exception as e:
+                print(f"Warning: failed to load primary motion model ({weights}): {e}")
+                print("  -> skipping primary motion stream for this video")
+                model_motion = None
         else:
-            model_motion = YOLO(params["primary_motion_model_path"])
+            print(f"Primary motion model not trained (no {weights})")
+            print("  -> skipping primary motion stream for this video")
 
+    # If neither primary is available, there's nothing to detect. Clean up
+    # and skip this video instead of producing an empty output.
+    if model_static is None and model_motion is None:
+        print(f"Skipping {file}: no trained primary models available")
+        cap.release()
+        writer.release()
+        return
+
+    # ---- STAGE 2c: initialise tracker + CSV ---------------------------
     tracker = KalmanTracker(
         params["match_distance_thresh"], params["delete_after_missed"]
     )
 
     prev_frames, frame_idx = None, 0
     csv_file = open(
-        os.path.join(params["output_folder"], base + "_tracking.csv"), "w", newline=""
+        os.path.join(params["output_folder"], base + "_tracking.csv"),
+        "w",
+        newline="",
     )
     csv_writer = csv.writer(csv_file)
-    # Updated CSV header with four streams
+    # One row per frame per tracked object. Empty string / 0.0 indicates the
+    # corresponding model was not available or did not fire.
     csv_writer.writerow(
         [
             "frame",
@@ -780,15 +918,22 @@ def process_video(file):
     current_frame = 0
     print_tick = 0
     start_time = time.time()
+    current_fps = 0.0  # so final print is safe even if the video is empty
 
     frame_count = 0
 
+    # ======================================================================
+    # STAGE 3 — Per-frame loop
+    # ======================================================================
     while True:
         ret, raw_frame = cap.read()
         if not ret:
             break
         frame_idx += 1
+
+        # Only process every (frame_skip+1)th frame. Counter reset at bottom.
         if frame_count == 0:
+            # ---- 3a: downscale + grayscale ----------------------------
             if params["scale_factor"] != 1.0:
                 raw_frame = cv2.resize(
                     raw_frame,
@@ -798,15 +943,21 @@ def process_video(file):
                 )
             gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
             frame = raw_frame.copy()
+
+            # Prime the 3-frame history on the first iteration.
             if prev_frames is None:
                 prev_frames = [gray.copy() for _ in range(3)]
                 continue
 
-            # only process motion information if necessary
+            # ---- 3b: build the false-colour motion image --------------
+            # Three temporally-offset frame differences are mapped to B/G/R
+            # channels so a moving object leaves a coloured "tail" that the
+            # motion detector can learn from.
             if params["primary_motion_classes"][0] != "0":
                 diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
 
                 if params["strategy"] == "exponential":
+                    # Exponential decay — smoother tails.
                     prev_frames[0] = gray
                     prev_frames[1] = cv2.addWeighted(
                         prev_frames[1], params["expA"], gray, params["expA2"], 0
@@ -815,10 +966,12 @@ def process_video(file):
                         prev_frames[2], params["expB"], gray, params["expB2"], 0
                     )
                 elif params["strategy"] == "sequential":
+                    # Plain frame-over-frame ring buffer.
                     prev_frames[2] = prev_frames[1]
                     prev_frames[1] = prev_frames[0]
                     prev_frames[0] = gray
 
+                # chromatic_tail_only: emphasise only the leading tail edge.
                 if params["chromatic_tail_only"] == "true":
                     tb = cv2.subtract(diffs[0], diffs[1])
                     tr = cv2.subtract(diffs[2], diffs[1])
@@ -870,11 +1023,14 @@ def process_video(file):
 
                 motion_image = cv2.merge((blue, green, red)).astype(np.uint8)
 
-            # Collect all primary detections
+            # ---- 3c: primary detections -------------------------------
+            # GUARD CHANGE: predicate is now "did a model actually load?"
+            # rather than "is a stream configured?". A configured stream with
+            # no weights falls through to the merge step with zero detections.
             all_detections = []
 
-            # Primary static detection
-            if params["primary_static_classes"][0] != "0":
+            # Primary STATIC detection
+            if model_static is not None:
                 results_static = model_static.predict(
                     frame, conf=params["primary_conf_thresh"], verbose=False
                 )
@@ -894,8 +1050,8 @@ def process_video(file):
                         }
                     )
 
-            # Primary motion detection
-            if params["primary_motion_classes"][0] != "0":
+            # Primary MOTION detection
+            if model_motion is not None:
                 results_motion = model_motion.predict(
                     motion_image, conf=params["primary_conf_thresh"], verbose=False
                 )
@@ -915,19 +1071,22 @@ def process_video(file):
                         }
                     )
 
-            # Merge detections based on proximity
+            # ---- 3d: merge overlapping detections ---------------------
+            # Two detections for the "same object" may come from both streams.
+            # Merge by proximity (centroid distance) or overlap (IoU). The
+            # dominant_source setting decides which stream's class wins; the
+            # losing stream's label is kept in the *_combined fields for the
+            # CSV.
             merged_detections = []
             for det in all_detections:
                 x1, y1, x2, y2 = det["coords"]
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
 
-                # Find matching existing detection
                 matched = False
                 for md in merged_detections:
                     md_cx, md_cy = md["centroid"]
                     dist = np.hypot(cx - md_cx, cy - md_cy)
 
-                    # Calculate IOU
                     md_x1, md_y1, md_x2, md_y2 = md["coords"]
                     overlap = iou((x1, y1, x2, y2), (md_x1, md_y1, md_x2, md_y2))
                     ms_source = md["source"]
@@ -936,71 +1095,56 @@ def process_video(file):
                         dist < params["centroid_merge_thresh"]
                         or overlap > params["iou_thresh"]
                     ):
-                        # Merge classes - keep highest confidence detection for each source
+                        # Same-source merge OR confidence-based policy:
+                        # keep whichever detection has the higher conf.
                         if (
                             det["source"] == ms_source
                             or params["dominant_source"] == "confidence"
-                        ):  # mathcing sources so select best, or confidence strategy used
+                        ):
                             if det["source"] == "static":
-                                # Keep highest confidence static detection
                                 if (
                                     "primary_conf" not in md
                                     or det["primary_conf"] > md["primary_conf"]
                                 ):
-                                    md["primary_class_combined"] = md[
-                                        "primary_class"
-                                    ]  # retain the combined primary
+                                    md["primary_class_combined"] = md["primary_class"]
                                     md["primary_conf_combined"] = md["primary_conf"]
                                     md["primary_class"] = det["primary_class"]
                                     md["primary_conf"] = det["primary_conf"]
-                                    md["coords"] = det[
-                                        "coords"
-                                    ]  # Update to higher conf box
+                                    md["coords"] = det["coords"]
                                     md["centroid"] = (cx, cy)
                                     md["source"] = det["source"]
-                            else:  # motion source
-                                # Keep highest confidence motion detection
+                            else:  # motion
                                 if (
                                     "primary_conf" not in md
                                     or det["primary_conf"] > md["primary_conf"]
                                 ):
-                                    md["primary_class_combined"] = md[
-                                        "primary_class"
-                                    ]  # retain the combined primary
+                                    md["primary_class_combined"] = md["primary_class"]
                                     md["primary_conf_combined"] = md["primary_conf"]
                                     md["primary_class"] = det["primary_class"]
                                     md["primary_conf"] = det["primary_conf"]
-                                    md["coords"] = det[
-                                        "coords"
-                                    ]  # Update to higher conf box
+                                    md["coords"] = det["coords"]
                                     md["centroid"] = (cx, cy)
                                     md["source"] = det["source"]
                         elif (
                             det["source"] == "static"
                             and params["dominant_source"] == "static"
                         ):
-                            # Keep static detection
-                            md["primary_class_combined"] = md[
-                                "primary_class"
-                            ]  # retain the combined primary
+                            md["primary_class_combined"] = md["primary_class"]
                             md["primary_conf_combined"] = md["primary_conf"]
                             md["primary_class"] = det["primary_class"]
                             md["primary_conf"] = det["primary_conf"]
-                            md["coords"] = det["coords"]  # Update to higher conf box
+                            md["coords"] = det["coords"]
                             md["centroid"] = (cx, cy)
                             md["source"] = det["source"]
                         elif (
                             det["source"] == "motion"
                             and params["dominant_source"] == "motion"
                         ):
-                            # Keep motion detection
-                            md["primary_class_combined"] = md[
-                                "primary_class"
-                            ]  # retain the combined primary
+                            md["primary_class_combined"] = md["primary_class"]
                             md["primary_conf_combined"] = md["primary_conf"]
                             md["primary_class"] = det["primary_class"]
                             md["primary_conf"] = det["primary_conf"]
-                            md["coords"] = det["coords"]  # Update to higher conf box
+                            md["coords"] = det["coords"]
                             md["centroid"] = (cx, cy)
                             md["source"] = det["source"]
 
@@ -1008,7 +1152,7 @@ def process_video(file):
                         break
 
                 if not matched:
-                    # Add as new detection
+                    # New unique detection.
                     new_det = {
                         "coords": det["coords"],
                         "centroid": (cx, cy),
@@ -1016,21 +1160,18 @@ def process_video(file):
                         "primary_class_combined": "",
                         "primary_conf_combined": 0.0,
                     }
-                    if det["source"] == "static":
-                        new_det["primary_class"] = det["primary_class"]
-                        new_det["primary_conf"] = det["primary_conf"]
-                        # ~ if 'secondary_static_class' in det:
-                        # ~ new_det['secondary_static_class'] = det['secondary_static_class']
-                        # ~ new_det['secondary_static_conf'] = det['secondary_static_conf']
-                    else:  # motion source
-                        new_det["primary_class"] = det["primary_class"]
-                        new_det["primary_conf"] = det["primary_conf"]
-                        # ~ if 'secondary_motion_class' in det:
-                        # ~ new_det['secondary_motion_class'] = det['secondary_motion_class']
-                        # ~ new_det['secondary_motion_conf'] = det['secondary_motion_conf']
+                    new_det["primary_class"] = det["primary_class"]
+                    new_det["primary_conf"] = det["primary_conf"]
                     merged_detections.append(new_det)
 
-            # Run secondary classification on each primary detection
+            # ================================================================
+            # STAGE 4 — Secondary (hierarchical) classification
+            # ----------------------------------------------------------------
+            # For each merged detection, optionally crop the box out and feed
+            # it to a per-class YOLO classifier. Missing secondary models for
+            # a primary class are handled by .get(..., None) falling through
+            # to the default (secondary_class = primary_class, conf = 1.0).
+            # ================================================================
             processed_detections = []
             for det in merged_detections:
                 coords = det["coords"]
@@ -1040,6 +1181,7 @@ def process_video(file):
                 primary_class_combined = det["primary_class_combined"]
                 primary_conf_combined = det["primary_conf_combined"]
 
+                # Route primary labels into per-stream columns for the CSV.
                 if source == "static":
                     det["primary_static_class"] = primary_class
                     det["primary_static_conf"] = primary_conf
@@ -1054,16 +1196,16 @@ def process_video(file):
                 if params["hierarchical_mode"]:
                     x1, y1, x2, y2 = coords
 
-                    # Determine which secondary model to use based on source and configuration
+                    # Pick which secondary model and which image to crop from.
+                    # Falls back to the opposite stream if the preferred one
+                    # isn't configured.
                     sec_model = None
                     crop_img = None
 
                     if source == "static":
-                        # Use static secondary model if configured
                         if len(params["secondary_static_classes"]) >= 2:
                             sec_model = secondary_static_models.get(primary_class, None)
                             crop_img = frame
-                        # Fallback to motion secondary model if static not available
                         elif len(params["secondary_motion_classes"]) >= 2:
                             sec_model = secondary_motion_models.get(primary_class, None)
                             crop_img = (
@@ -1072,24 +1214,21 @@ def process_video(file):
                                 else frame
                             )
                     else:  # motion source
-                        # Use motion secondary model if configured
                         if len(params["secondary_motion_classes"]) >= 2:
                             sec_model = secondary_motion_models.get(primary_class, None)
                             crop_img = motion_image
-                        # Fallback to static secondary model if motion not available
                         elif len(params["secondary_static_classes"]) >= 2:
                             sec_model = secondary_static_models.get(primary_class, None)
                             crop_img = frame
 
-                    # Get the cropped region
                     crop = None
                     if crop_img is not None:
                         crop = crop_img[y1:y2, x1:x2]
 
+                    # Sensible defaults if no secondary model / no valid crop.
                     secondary_class = primary_class
                     secondary_conf = 1.0
 
-                    # Run secondary classification if we have a model and valid crop
                     if sec_model and crop is not None and crop.size > 0:
                         sec_results = sec_model.predict(crop, verbose=False)
                         if sec_results[0].probs is not None:
@@ -1097,23 +1236,24 @@ def process_video(file):
                             secondary_conf = sec_results[0].probs.top1conf.item()
                             secondary_class = sec_model.names[secondary_class_idx]
 
-                    # Add secondary results to detection
                     if source == "static":
                         det["secondary_static_class"] = secondary_class
                         det["secondary_static_conf"] = secondary_conf
-                    else:  # motion source
+                    else:
                         det["secondary_motion_class"] = secondary_class
                         det["secondary_motion_conf"] = secondary_conf
 
                 processed_detections.append(det)
 
-            # Prepare for tracking
+            # ================================================================
+            # STAGE 5 — Tracking, rendering, CSV output
+            # ================================================================
+
+            # Feed centroids to the Kalman tracker -> {det_idx: track_id}.
             cents = [d["centroid"] for d in processed_detections]
             assignment = tracker.update(cents)
 
-            # ~ frame = motion_image ## enable this line ot save the motion video instead of static
-
-            # Process tracked objects
+            # Draw each tracked detection on the output frame and log it.
             for idx, det in enumerate(processed_detections):
                 tid = assignment.get(idx, None)
                 if tid is None or tid not in tracker.tracks:
@@ -1122,7 +1262,7 @@ def process_video(file):
                 x1, y1, x2, y2 = det["coords"]
                 cx, cy = det["centroid"]
 
-                # Get all class info with default values
+                # Pull all four stream results with safe defaults.
                 ps_class = det.get("primary_static_class", "")
                 ps_conf = det.get("primary_static_conf", 0)
                 pm_class = det.get("primary_motion_class", "")
@@ -1133,9 +1273,8 @@ def process_video(file):
                 sm_conf = det.get("secondary_motion_conf", 0)
                 p_source = det.get("source", "")
 
-                # Create display label
+                # Label text uses whichever stream produced this detection.
                 label_parts = []
-                # ~ if ps_class:
                 if p_source == "static":
                     label_parts.append(f"{ps_class.upper()}")
                     primary_cls = ps_class
@@ -1148,7 +1287,9 @@ def process_video(file):
                 ]
                 secondary_col = (255, 255, 255)
 
+                # ---- 5a: draw bounding box + label ---------------------
                 if params["hierarchical_mode"]:
+                    # Pick secondary colour from whichever secondary fired.
                     if sm_class != "" and sm_class != primary_cls:
                         secondary_cls = sm_class
                         secondary_col = params["secondary_colors"][
@@ -1160,6 +1301,7 @@ def process_video(file):
                             params["secondary_classes"].index(secondary_cls)
                         ]
 
+                    # If no secondary to display, draw a single box + label.
                     if primary_cls in params["primary_classes"]:
                         label = f"{tid} {primary_cls.upper()}"
                         label_size, _ = cv2.getTextSize(
@@ -1197,7 +1339,7 @@ def process_video(file):
                             cv2.LINE_AA,
                         )
                     else:
-                        # Draw outer static box (slightly larger)
+                        # Nested boxes: outer = primary, inner = secondary.
                         outer_thickness = params["line_thickness"] + 2
                         cv2.rectangle(
                             frame,
@@ -1242,6 +1384,7 @@ def process_video(file):
                             cv2.LINE_AA,
                         )
                 else:
+                    # Flat mode — single box, primary label only.
                     label = f"{tid} {primary_cls}"
                     label_size, _ = cv2.getTextSize(
                         label,
@@ -1261,7 +1404,11 @@ def process_video(file):
                         -1,
                     )
                     cv2.rectangle(
-                        frame, (x1, y1), (x2, y2), primary_col, params["line_thickness"]
+                        frame,
+                        (x1, y1),
+                        (x2, y2),
+                        primary_col,
+                        params["line_thickness"],
                     )
                     cv2.putText(
                         frame,
@@ -1274,7 +1421,7 @@ def process_video(file):
                         cv2.LINE_AA,
                     )
 
-                # Draw motion vector (if tracking available)
+                # ---- 5b: draw the KF motion vector ---------------------
                 if tid in tracker.tracks:
                     state_post = tracker.tracks[tid]["kf"].statePost
                     x, y = state_post[0, 0], state_post[1, 0]
@@ -1305,7 +1452,10 @@ def process_video(file):
                         -params["line_thickness"],
                     )
 
-                # Write to CSV
+                # ---- 5c: CSV row ---------------------------------------
+                # One row per tracked detection per frame. Empty strings and
+                # zero conf indicate the corresponding stream didn't fire or
+                # wasn't available.
                 csv_writer.writerow(
                     [
                         frame_idx,
@@ -1323,8 +1473,8 @@ def process_video(file):
                     ]
                 )
 
-            # ~ # print frame number
-            text_color = (255, 255, 255)  # white text
+            # ---- 5d: frame counter HUD + progress ---------------------
+            text_color = (255, 255, 255)
             label = str(current_frame)
             label_size, _ = cv2.getTextSize(
                 label,
@@ -1370,17 +1520,24 @@ def process_video(file):
             current_frame += 1
             print_tick += 1
 
+        # Frame-skip counter — rolls over at frame_skip+1 so we process
+        # every (frame_skip+1)th frame.
         frame_count += 1
-
         if frame_count > params["frame_skip"]:
             frame_count = 0
 
+    # ---- STAGE 5e: close outputs -------------------------------------
     cap.release()
     writer.release()
     csv_file.close()
     print(f"Done processing {base} | {current_fps:.1f} FPS")
 
 
+# ============================================================================
+# Entry point
+# ----------------------------------------------------------------------------
+# Train (or verify) models once, then batch-process every file in input/.
+# ============================================================================
 if __name__ == "__main__":
     train_models()
     for vid in glob.glob(os.path.join(params["input_folder"], "*.*")):
