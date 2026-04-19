@@ -262,26 +262,46 @@ def count_images_in_dataset(path):
                 data = yaml.safe_load(f)
 
             train_path = data["train"]
+            val_path = data.get("val", None)
             base_dir = os.path.dirname(path)
-            abs_train_path = os.path.join(base_dir, train_path)
+            abs_train_path = os.path.join(base_dir, train_path) if train_path else None
+            abs_val_path = os.path.join(base_dir, val_path) if val_path else None
 
             if abs_train_path.endswith(".txt"):
                 # List-of-paths format.
                 with open(abs_train_path, "r") as f:
-                    return len(f.readlines())
+                    train_count = len(f.readlines()) if abs_train_path else 0
+                with open(abs_val_path, "r") as f:
+                    val_count = len(f.readlines()) if abs_val_path else 0
             else:
                 # Directory full of image files.
                 image_exts = [".jpg", ".jpeg", ".png", ".bmp", ".tiff"]
-                return len(
-                    [
-                        f
-                        for f in os.listdir(abs_train_path)
-                        if os.path.splitext(f)[1].lower() in image_exts
-                    ]
+                train_count = (
+                    len(
+                        [
+                            f
+                            for f in os.listdir(abs_train_path)
+                            if os.path.splitext(f)[1].lower() in image_exts
+                        ]
+                    )
+                    if abs_train_path
+                    else 0
                 )
+                val_count = (
+                    len(
+                        [
+                            f
+                            for f in os.listdir(abs_val_path)
+                            if os.path.splitext(f)[1].lower() in image_exts
+                        ]
+                    )
+                    if abs_val_path
+                    else 0
+                )
+            return train_count, val_count
         except Exception as e:
             print(f"Error counting images: {e}")
-            return 0
+            return 0, 0
 
     # Secondary-model case: class-folder tree.
     elif os.path.isdir(path):
@@ -326,15 +346,15 @@ def maybe_retrain(
         else:
             last_count = -1
 
-        current_count = count_images_in_dataset(yaml_path)
+        train, val = count_images_in_dataset(yaml_path)
 
         # If the count changed, ask the user whether to retrain.
-        if current_count != last_count:
+        if train != last_count:
             root = tk.Tk()
             root.withdraw()
             msg = (
                 f"New annotations detected for '{model_type}' model.\n"
-                f"Image count changed from {last_count} to {current_count}.\n\n"
+                f"Training image count changed from {last_count} to {train}.\n\n"
                 "Do you want to re-train this model?"
             )
             response = messagebox.askyesno("Retrain model?", msg)
@@ -376,7 +396,7 @@ def maybe_retrain(
 
                 # Record count + snapshot of settings used.
                 with open(os.path.join(project_path, "train_count.txt"), "w") as f:
-                    f.write(str(current_count))
+                    f.write(str(train))
                 os.makedirs(project_path, exist_ok=True)
                 dst = os.path.join(project_path, "saved_settings.ini")
                 try:
@@ -392,12 +412,12 @@ def maybe_retrain(
     # ---- branch B: first-time training --------------------------------
     else:
         print(f"{model_type} model not found, building it...")
-        current_count = count_images_in_dataset(yaml_path)
-        if current_count < 5:
+        train, val = count_images_in_dataset(yaml_path)
+        if train < 2 or val < 2:
             # Not enough data. Leave best.pt absent; caller handles skip.
             print(
                 f"Error: Not enough images to train {model_type} model "
-                f"(found {current_count}, need at least 5)."
+                f"(found {train} training images and {val} validation images, need at least 2 of each)."
             )
             return False
 
@@ -418,10 +438,10 @@ def maybe_retrain(
         print(f"Done training {model_type} model")
 
         # Record count + snapshot of settings used.
-        current_count = count_images_in_dataset(yaml_path)
+        train, val = count_images_in_dataset(yaml_path)
         os.makedirs(project_path, exist_ok=True)
         with open(os.path.join(project_path, "train_count.txt"), "w") as f:
-            f.write(str(current_count))
+            f.write(str(train))
         os.makedirs(project_path, exist_ok=True)
         dst = os.path.join(project_path, "saved_settings.ini")
         try:
@@ -547,12 +567,12 @@ def train_models():
                 model_dir = f"models/model_secondary_motion_{primary_class}"
                 weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
 
-                n_image = count_images_in_dataset(data_dir)
-                if n_image < 2:
+                train_count, val_count = count_images_in_dataset(data_dir)
+                if train_count < 2 or val_count < 2:
                     print(
                         f"Error: Not enough images to train secondary motion model "
-                        f"for primary class '{primary_class}' (found {n_image}, "
-                        f"need at least 2). Skipping this secondary model."
+                        f"for primary class '{primary_class}' (found {train_count} training images and {val_count} validation images, "
+                        f"need at least 2 of each). Skipping this secondary model."
                     )
                     continue
 
