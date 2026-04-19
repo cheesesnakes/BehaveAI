@@ -337,6 +337,16 @@ secondary_static_classes = 0
 secondary_static_colors = 0
 secondary_static_hotkeys = 0
 
+# Use an external pretrained model instead of training from annotations.
+# Leave blank to use BehaveAI's trained best.pt (default behaviour).
+# Accepted: .pt, .torchscript, .onnx, .engine, or an NCNN folder path.
+primary_static_external_model =
+secondary_static_external_model =
+
+# For the pseudo-labeller: confidence threshold and class remap.
+pseudo_label_conf = 0.6
+pseudo_label_class_map =
+
 """
 
             ini_path.write_text(ini_template)

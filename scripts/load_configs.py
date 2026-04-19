@@ -215,10 +215,17 @@ def read_parameters():
             f"{ANNOTATION_FOLDER}/annot_motion/labels/train"
         )
         params["motion_val_labels_dir"] = f"{ANNOTATION_FOLDER}/annot_motion/labels/val"
+        params["primary_static_external_model"] = (
+            config["DEFAULT"].get("primary_static_external_model", "").strip()
+        )
+        params["secondary_static_external_model"] = (
+            config["DEFAULT"].get("secondary_static_external_model", "").strip()
+        )
 
         if (
             len(params["secondary_motion_classes"]) >= 2
             or len(params["secondary_static_classes"]) >= 2
+            or params["secondary_static_external_model"] != ""
         ):
             params["hierarchical_mode"] = True
             params["motion_cropped_base_dir"] = f"{ANNOTATION_FOLDER}/annot_motion_crop"
@@ -257,7 +264,6 @@ def read_parameters():
         params["secondary_hotkeys"] = (
             params["secondary_static_hotkeys"] + params["secondary_motion_hotkeys"]
         )
-
         params["primary_static_project_path"] = f"{MODEL_FOLDER}/model_primary_static"
         params["primary_static_model_path"] = os.path.join(
             f"{MODEL_FOLDER}/model_primary_static", "train", "weights", "best.pt"

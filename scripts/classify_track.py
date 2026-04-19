@@ -474,74 +474,84 @@ def train_models():
 
     # ---- hierarchical (secondary) models ------------------------------
     if params["hierarchical_mode"]:
-        # Secondary STATIC classifiers — one YOLO-cls model per primary class.
-        secondary_static_models = {}
-        static_class_map = [
-            [None] * len(params["secondary_classes"])
-            for _ in range(len(params["primary_classes"]))
-        ]
-        if len(params["secondary_static_classes"]) >= 2:
-            for primary_class in params["primary_classes"]:
-                idx = params["primary_classes"].index(primary_class)
-                hotkey = params["primary_hotkeys"][idx]
+        # train if no external model is spcified
+        if params["secondary_static_external_model"] != "":
+            # Secondary STATIC classifiers — one YOLO-cls model per primary class.
+            secondary_static_models = {}
+            static_class_map = [
+                [None] * len(params["secondary_classes"])
+                for _ in range(len(params["primary_classes"]))
+            ]
+            if len(params["secondary_static_classes"]) >= 2:
+                for primary_class in params["primary_classes"]:
+                    idx = params["primary_classes"].index(primary_class)
+                    hotkey = params["primary_hotkeys"][idx]
 
-                # Skip primaries that are themselves in the secondary set, or
-                # in the ignore list, or have no annotation data on disk.
-                if hotkey in params["secondary_hotkeys"]:
-                    continue
-                if primary_class in params["ignore_secondary"]:
-                    continue
-                data_dir = os.path.join(
-                    params["secondary_static_data_path"], primary_class
-                )
-                if not os.path.isdir(data_dir):
-                    continue
-
-                model_dir = f"models/model_static_static_{primary_class}"
-                weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
-
-                # Not enough annotations -> leave weights absent, skip load.
-                n_image = count_images_in_dataset(data_dir)
-                if n_image < 2:
-                    print(
-                        f"Error: Not enough images to train secondary static model "
-                        f"for primary class '{primary_class}' (found {n_image}, "
-                        f"need at least 2). Skipping this secondary model."
+                    # Skip primaries that are themselves in the secondary set, or
+                    # in the ignore list, or have no annotation data on disk.
+                    if hotkey in params["secondary_hotkeys"]:
+                        continue
+                    if primary_class in params["ignore_secondary"]:
+                        continue
+                    data_dir = os.path.join(
+                        params["secondary_static_data_path"], primary_class
                     )
-                    continue
+                    if not os.path.isdir(data_dir):
+                        continue
 
-                maybe_retrain(
-                    model_dir,
-                    data_dir,
-                    model_dir,
-                    weights_path,
-                    params["secondary_classifier"],
-                    params["secondary_epochs"],
-                    224,
-                )
+                    model_dir = f"models/model_static_static_{primary_class}"
+                    weights_path = os.path.join(
+                        model_dir, "train", "weights", "best.pt"
+                    )
 
-                # Load only if weights actually exist. maybe_retrain can
-                # silently skip when first-time training isn't allowed.
-                if os.path.isfile(weights_path):
-                    try:
-                        if params["use_ncnn"] == "true":
-                            secondary_static_models[primary_class] = (
-                                load_model_with_ncnn_preference(
-                                    weights_path, "classify"
-                                )
-                            )
-                        else:
-                            secondary_static_models[primary_class] = YOLO(weights_path)
-                    except Exception as e:
+                    # Not enough annotations -> leave weights absent, skip load.
+                    n_image = count_images_in_dataset(data_dir)
+                    if n_image < 2:
                         print(
-                            f"Warning: failed to load secondary static model for "
-                            f"'{primary_class}': {e} — skipping at inference."
+                            f"Error: Not enough images to train secondary static model "
+                            f"for primary class '{primary_class}' (found {n_image}, "
+                            f"need at least 2). Skipping this secondary model."
                         )
+                        continue
+
+                    maybe_retrain(
+                        model_dir,
+                        data_dir,
+                        model_dir,
+                        weights_path,
+                        params["secondary_classifier"],
+                        params["secondary_epochs"],
+                        224,
+                    )
+
+                    # Load only if weights actually exist. maybe_retrain can
+                    # silently skip when first-time training isn't allowed.
+                    if os.path.isfile(weights_path):
+                        try:
+                            if params["use_ncnn"] == "true":
+                                secondary_static_models[primary_class] = (
+                                    load_model_with_ncnn_preference(
+                                        weights_path, "classify"
+                                    )
+                                )
+                            else:
+                                secondary_static_models[primary_class] = YOLO(
+                                    weights_path
+                                )
+                        except Exception as e:
+                            print(
+                                f"Warning: failed to load secondary static model for "
+                                f"'{primary_class}': {e} — skipping at inference."
+                            )
                 else:
                     print(
                         f"Secondary static model for '{primary_class}' has no "
                         f"weights at {weights_path} — skipping at inference."
                     )
+        else:
+            secondary_static_models = YOLO(
+                params["secondary_static_external_model"], task="classify"
+            )
 
         # Secondary MOTION classifiers — mirror of the static block.
         secondary_motion_models = {}
@@ -610,16 +620,19 @@ def train_models():
     # ---- primary detectors --------------------------------------------
     # These are trained AFTER the secondaries because in hierarchical mode
     # the secondary annotations share source frames with primary annotations.
-    if params["primary_static_classes"][0] != "0":
-        maybe_retrain(
-            "models/model_primary_static",
-            params["primary_static_yaml_path"],
-            params["primary_static_project_path"],
-            params["primary_static_model_path"],
-            params["primary_classifier"],
-            params["primary_epochs"],
-            640,
-        )
+
+    # check if external static model is specified, else train
+    if params["primary_static_external_model"] == "":
+        if params["primary_static_classes"][0] != "0":
+            maybe_retrain(
+                "models/model_primary_static",
+                params["primary_static_yaml_path"],
+                params["primary_static_project_path"],
+                params["primary_static_model_path"],
+                params["primary_classifier"],
+                params["primary_epochs"],
+                640,
+            )
 
     if params["primary_motion_classes"][0] != "0":
         maybe_retrain(
@@ -833,6 +846,75 @@ class KalmanTracker:
 # ============================================================================
 
 
+def create_motion_image(prev_frames, gray):
+    diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
+
+    if params["strategy"] == "exponential":
+        # Exponential decay — smoother tails.
+        prev_frames[0] = gray
+        prev_frames[1] = cv2.addWeighted(
+            prev_frames[1], params["expA"], gray, 1 - params["expA"], 0
+        )
+        prev_frames[2] = cv2.addWeighted(
+            prev_frames[2], params["expB"], gray, 1 - params["expB"], 0
+        )
+    elif params["strategy"] == "sequential":
+        # Plain frame-over-frame ring buffer.
+        prev_frames[2] = prev_frames[1]
+        prev_frames[1] = prev_frames[0]
+        prev_frames[0] = gray
+    # chromatic_tail_only: emphasise only the leading tail edge.
+    if params["chromatic_tail_only"] == "true":
+        tb = cv2.subtract(diffs[0], diffs[1])
+        tr = cv2.subtract(diffs[2], diffs[1])
+        tg = cv2.subtract(diffs[1], diffs[0])
+
+        blue = cv2.addWeighted(
+            gray,
+            params["lum_weight"],
+            tb,
+            params["rgb_multipliers"][2],
+            params["motion_threshold"],
+        )
+        green = cv2.addWeighted(
+            gray,
+            params["lum_weight"],
+            tg,
+            params["rgb_multipliers"][1],
+            params["motion_threshold"],
+        )
+        red = cv2.addWeighted(
+            gray,
+            params["lum_weight"],
+            tr,
+            params["rgb_multipliers"][0],
+            params["motion_threshold"],
+        )
+    else:
+        blue = cv2.addWeighted(
+            gray,
+            params["lum_weight"],
+            diffs[0],
+            params["rgb_multipliers"][2],
+            params["motion_threshold"],
+        )
+        green = cv2.addWeighted(
+            gray,
+            params["lum_weight"],
+            diffs[1],
+            params["rgb_multipliers"][1],
+            params["motion_threshold"],
+        )
+        red = cv2.addWeighted(
+            gray,
+            params["lum_weight"],
+            diffs[2],
+            params["rgb_multipliers"][0],
+            params["motion_threshold"],
+        )
+    return cv2.merge((blue, green, red)).astype(np.uint8)
+
+
 def process_video(file):
     # ---- STAGE 2a: open inputs and outputs ----------------------------
     # Preserve any subfolder structure from input/ under output/.
@@ -871,21 +953,27 @@ def process_video(file):
     model_motion = None
 
     # Primary STATIC
-    if params["primary_static_classes"][0] != "0":
+    if (
+        params["primary_static_classes"][0] != "0"
+        and params["primary_static_external_model"] == ""
+    ):
         weights = params["primary_static_model_path"]  # already ends in best.pt
-        if os.path.isfile(weights):
-            try:
-                if params["use_ncnn"] == "true":
-                    model_static = load_model_with_ncnn_preference(weights, "detect")
-                else:
-                    model_static = YOLO(weights)
-            except Exception as e:
-                print(f"Warning: failed to load primary static model ({weights}): {e}")
-                print("  -> skipping primary static stream for this video")
-                model_static = None
-        else:
-            print(f"Primary static model not trained (no {weights})")
+    else:
+        weights = params["primary_static_external_model"]
+
+    if os.path.isfile(weights):
+        try:
+            if params["use_ncnn"] == "true":
+                model_static = load_model_with_ncnn_preference(weights, "detect")
+            else:
+                model_static = YOLO(weights)
+        except Exception as e:
+            print(f"Warning: failed to load primary static model ({weights}): {e}")
             print("  -> skipping primary static stream for this video")
+            model_static = None
+    else:
+        print(f"Primary static model not trained (no {weights})")
+        print("  -> skipping primary static stream for this video")
 
     # Primary MOTION
     if params["primary_motion_classes"][0] != "0":
@@ -987,74 +1075,7 @@ def process_video(file):
             # channels so a moving object leaves a coloured "tail" that the
             # motion detector can learn from.
             if params["primary_motion_classes"][0] != "0":
-                diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
-
-                if params["strategy"] == "exponential":
-                    # Exponential decay — smoother tails.
-                    prev_frames[0] = gray
-                    prev_frames[1] = cv2.addWeighted(
-                        prev_frames[1], params["expA"], gray, params["expA2"], 0
-                    )
-                    prev_frames[2] = cv2.addWeighted(
-                        prev_frames[2], params["expB"], gray, params["expB2"], 0
-                    )
-                elif params["strategy"] == "sequential":
-                    # Plain frame-over-frame ring buffer.
-                    prev_frames[2] = prev_frames[1]
-                    prev_frames[1] = prev_frames[0]
-                    prev_frames[0] = gray
-
-                # chromatic_tail_only: emphasise only the leading tail edge.
-                if params["chromatic_tail_only"] == "true":
-                    tb = cv2.subtract(diffs[0], diffs[1])
-                    tr = cv2.subtract(diffs[2], diffs[1])
-                    tg = cv2.subtract(diffs[1], diffs[0])
-
-                    blue = cv2.addWeighted(
-                        gray,
-                        params["lum_weight"],
-                        tb,
-                        params["rgb_multipliers"][2],
-                        params["motion_threshold"],
-                    )
-                    green = cv2.addWeighted(
-                        gray,
-                        params["lum_weight"],
-                        tg,
-                        params["rgb_multipliers"][1],
-                        params["motion_threshold"],
-                    )
-                    red = cv2.addWeighted(
-                        gray,
-                        params["lum_weight"],
-                        tr,
-                        params["rgb_multipliers"][0],
-                        params["motion_threshold"],
-                    )
-                else:
-                    blue = cv2.addWeighted(
-                        gray,
-                        params["lum_weight"],
-                        diffs[0],
-                        params["rgb_multipliers"][2],
-                        params["motion_threshold"],
-                    )
-                    green = cv2.addWeighted(
-                        gray,
-                        params["lum_weight"],
-                        diffs[1],
-                        params["rgb_multipliers"][1],
-                        params["motion_threshold"],
-                    )
-                    red = cv2.addWeighted(
-                        gray,
-                        params["lum_weight"],
-                        diffs[2],
-                        params["rgb_multipliers"][0],
-                        params["motion_threshold"],
-                    )
-
-                motion_image = cv2.merge((blue, green, red)).astype(np.uint8)
+                motion_image = create_motion_image(prev_frames, gray)
 
             # ---- 3c: primary detections -------------------------------
             # GUARD CHANGE: predicate is now "did a model actually load?"
@@ -1228,53 +1249,52 @@ def process_video(file):
 
                 if params["hierarchical_mode"]:
                     x1, y1, x2, y2 = coords
-
+                    motion_image = create_motion_image(prev_frames, gray)
                     # Pick which secondary model and which image to crop from.
                     # Falls back to the opposite stream if the preferred one
                     # isn't configured.
-                    sec_model = None
-                    crop_img = None
+                    static_crop = frame[y1:y2, x1:x2] if frame is not None else None
+                    motion_crop = (
+                        motion_image[y1:y2, x1:x2] if motion_image is not None else None
+                    )
 
-                    if source == "static":
-                        if len(params["secondary_static_classes"]) >= 2:
-                            sec_model = secondary_static_models.get(primary_class, None)
-                            crop_img = frame
-                        elif len(params["secondary_motion_classes"]) >= 2:
-                            sec_model = secondary_motion_models.get(primary_class, None)
-                            crop_img = (
-                                motion_image
-                                if params["primary_motion_classes"][0] != "0"
-                                else frame
-                            )
-                    else:  # motion source
-                        if len(params["secondary_motion_classes"]) >= 2:
-                            sec_model = secondary_motion_models.get(primary_class, None)
-                            crop_img = motion_image
-                        elif len(params["secondary_static_classes"]) >= 2:
-                            sec_model = secondary_static_models.get(primary_class, None)
-                            crop_img = frame
+                    def _run(model_dict, crop):
+                        if model_dict is None or crop is None or crop.size == 0:
+                            return None, None
+                        m = model_dict.get(primary_class)
+                        if m is None:
+                            return None, None
+                        res = m.predict(crop, verbose=False)
+                        if res[0].probs is None:
+                            return None, None
+                        idx = res[0].probs.top1
+                        return m.names[idx], res[0].probs.top1conf.item()
 
-                    crop = None
-                    if crop_img is not None:
-                        crop = crop_img[y1:y2, x1:x2]
+                    # Default: inherit primary. Overwritten below if a secondary fires.
 
-                    # Sensible defaults if no secondary model / no valid crop.
-                    secondary_class = primary_class
-                    secondary_conf = 1.0
+                    # Static secondary — only if configured
+                    if len(params["secondary_static_classes"]) >= 2:
+                        cls, conf = _run(secondary_static_models, static_crop)
+                        if cls is not None:
+                            det["secondary_static_class"] = cls
+                            det["secondary_static_conf"] = conf
+                    # External static secondary — only if configured, and needs a static_crop
+                    elif (
+                        params["secondary_static_external_model"] != ""
+                        and static_crop is not None
+                    ):
+                        cls, conf = _run(secondary_static_models, static_crop)
+                        if cls is not None:
+                            det["secondary_static_class"] = cls
+                            det["secondary_static_conf"] = conf
+                            print(cls, conf)
 
-                    if sec_model and crop is not None and crop.size > 0:
-                        sec_results = sec_model.predict(crop, verbose=False)
-                        if sec_results[0].probs is not None:
-                            secondary_class_idx = sec_results[0].probs.top1
-                            secondary_conf = sec_results[0].probs.top1conf.item()
-                            secondary_class = sec_model.names[secondary_class_idx]
-
-                    if source == "static":
-                        det["secondary_static_class"] = secondary_class
-                        det["secondary_static_conf"] = secondary_conf
-                    else:
-                        det["secondary_motion_class"] = secondary_class
-                        det["secondary_motion_conf"] = secondary_conf
+                    # Motion secondary — only if configured, and needs a motion_image
+                    if len(params["secondary_motion_classes"]) >= 2:
+                        cls, conf = _run(secondary_motion_models, motion_crop)
+                        if cls is not None:
+                            det["secondary_motion_class"] = cls
+                            det["secondary_motion_conf"] = conf
 
                 processed_detections.append(det)
 
@@ -1577,6 +1597,7 @@ def process_video(file):
 # Train (or verify) models once, then batch-process every file in input/.
 # ============================================================================
 if __name__ == "__main__":
+    print(params["primary_static_external_model"])
     train_models()
 
     input_root = params["input_folder"]
