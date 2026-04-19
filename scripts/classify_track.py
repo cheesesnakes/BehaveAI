@@ -312,11 +312,11 @@ def count_images_in_dataset(path):
                 total_count += sum(
                     1 for f in files if os.path.splitext(f)[1].lower() in image_exts
                 )
-        return total_count
+        return total_count, total_count
 
     else:
         print(f"Unsupported dataset format: {path}")
-        return 0
+        return 0, 0
 
 
 def maybe_retrain(
