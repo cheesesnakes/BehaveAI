@@ -565,7 +565,7 @@ def main():
         return
     else:
         root = tk.Tk()
-        app = ScriptRunnerApp(root)
+        app = ScriptRunnerApp(root)  # noqa: F841
         root.mainloop()
 
 

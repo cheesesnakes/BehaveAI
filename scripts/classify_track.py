@@ -43,6 +43,7 @@ from tkinter import messagebox
 
 import cv2
 import numpy as np
+import pandas as pd
 from load_configs import load_params
 from scipy.optimize import linear_sum_assignment
 from ultralytics import YOLO
@@ -814,8 +815,17 @@ class KalmanTracker:
 
 def process_video(file):
     # ---- STAGE 2a: open inputs and outputs ----------------------------
-    os.makedirs(params["output_folder"], exist_ok=True)
-    base = os.path.splitext(os.path.basename(file))[0]
+    # Preserve any subfolder structure from input/ under output/.
+    # e.g.  input/site_A/day_2/clip.mp4
+    #   ->  output/site_A/day_2/clip_detected.mp4
+    #       output/site_A/day_2/clip_tracking.csv
+    rel = os.path.relpath(file, params["input_folder"])
+    rel_dir = os.path.dirname(rel)  # "site_A/day_2" or ""
+    base = os.path.splitext(os.path.basename(rel))[0]
+
+    out_dir = os.path.join(params["output_folder"], rel_dir)
+    os.makedirs(out_dir, exist_ok=True)
+
     cap = cv2.VideoCapture(file)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if not cap.isOpened():
@@ -824,7 +834,7 @@ def process_video(file):
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * params["scale_factor"])
     fps = cap.get(cv2.CAP_PROP_FPS)
     writer = cv2.VideoWriter(
-        os.path.join(params["output_folder"], base + "_detected.mp4"),
+        os.path.join(out_dir, base + "_detected.mp4"),
         cv2.VideoWriter_fourcc(*"mp4v"),
         fps,
         (w, h),
@@ -880,8 +890,11 @@ def process_video(file):
         print(f"Skipping {file}: no trained primary models available")
         cap.release()
         writer.release()
+        try:
+            os.remove(os.path.join(out_dir, base + "_detected.mp4"))
+        except OSError:
+            pass
         return
-
     # ---- STAGE 2c: initialise tracker + CSV ---------------------------
     tracker = KalmanTracker(
         params["match_distance_thresh"], params["delete_after_missed"]
@@ -889,7 +902,7 @@ def process_video(file):
 
     prev_frames, frame_idx = None, 0
     csv_file = open(
-        os.path.join(params["output_folder"], base + "_tracking.csv"),
+        os.path.join(out_dir, base + "_tracking.csv"),
         "w",
         newline="",
     )
@@ -1526,11 +1539,16 @@ def process_video(file):
         if frame_count > params["frame_skip"]:
             frame_count = 0
 
+    # save csv in object
+    data = pd.read_csv(os.path.join(out_dir, base + "_tracking.csv"))
+
     # ---- STAGE 5e: close outputs -------------------------------------
     cap.release()
     writer.release()
     csv_file.close()
     print(f"Done processing {base} | {current_fps:.1f} FPS")
+
+    return data
 
 
 # ============================================================================
@@ -1540,5 +1558,31 @@ def process_video(file):
 # ============================================================================
 if __name__ == "__main__":
     train_models()
-    for vid in glob.glob(os.path.join(params["input_folder"], "*.*")):
-        process_video(vid)
+
+    input_root = params["input_folder"]
+    video_exts = {
+        ".mp4",
+        ".avi",
+        ".mov",
+        ".mkv",
+        ".m4v",
+        ".wmv",
+        ".flv",
+        ".mpg",
+        ".mpeg",
+    }
+
+    data = pd.DataFrame()
+
+    for vid in sorted(glob.glob(os.path.join(input_root, "**", "*"), recursive=True)):
+        if not os.path.isfile(vid):
+            continue
+        if os.path.splitext(vid)[1].lower() not in video_exts:
+            continue
+        temp = process_video(vid)
+
+        temp["video"] = os.path.relpath(vid, input_root)
+
+        data = pd.concat([data, temp], ignore_index=True)
+
+    data.to_csv(os.path.join(params["output_folder"], "tracking_data.csv"), index=False)

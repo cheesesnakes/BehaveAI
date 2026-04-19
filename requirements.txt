@@ -33,6 +33,7 @@ nvidia-nvshmem-cu13==3.4.5
 nvidia-nvtx==13.0.85
 opencv-python==4.13.0.92
 packaging==26.0
+pandas==3.0.2
 pillow==12.2.0
 polars==1.39.3
 polars-runtime-32==1.39.3
