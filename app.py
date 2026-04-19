@@ -10,6 +10,7 @@ BehaveAI Launcher (project-aware)
 
 """
 
+import argparse
 import base64
 import configparser
 import os
@@ -483,9 +484,92 @@ secondary_static_hotkeys = 0
         self.root.after(50, self.update_output)
 
 
+def main():
+    """
+    Entry point for the BehaveAI Launcher application.
+
+    Command line arguments determine the mode of operation:
+    - No arguments: Launch the GUI application.
+    - "list-projects": Print the list of existing projects to stdout and exit.
+    - "annotate <project_name> <file_name>": Run the annotation script for the specified project
+    - "inspect <project_name> <file_name>": Run the dataset inspection script for the specified project.
+    - "classify <project_name>": Run the training and classification script for the specified project.
+    - "live <project_name>": Run the live classification script for the specified project.
+    - "settings <project_name>": Run the settings GUI for the specified project.
+    """
+
+    # Argument parsing
+    parser = argparse.ArgumentParser(description="BehaveAI Launcher")
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.add_parser("list-projects", help="List existing projects")
+    annotate_parser = subparsers.add_parser("annotate", help="Run annotation script")
+    annotate_parser.add_argument("project_name", help="Name of the project")
+    annotate_parser.add_argument(
+        "--file_name", help="Name of the file to annotate", required=False
+    )
+    inspect_parser = subparsers.add_parser(
+        "inspect", help="Run dataset inspection script"
+    )
+    inspect_parser.add_argument("project_name", help="Name of the project")
+    classify_parser = subparsers.add_parser(
+        "classify", help="Run training and classification script"
+    )
+    classify_parser.add_argument("project_name", help="Name of the project")
+    live_parser = subparsers.add_parser("live", help="Run live classification script")
+    live_parser.add_argument("project_name", help="Name of the project")
+    settings_parser = subparsers.add_parser("settings", help="Run settings GUI")
+    settings_parser.add_argument("project_name", help="Name of the project")
+
+    args = parser.parse_args()
+
+    if args.command == "list-projects":
+        # List existing projects and exit
+        base_dir = Path(os.getcwd())
+        projects_dir = base_dir / "projects"
+        if not projects_dir.exists():
+            print("No projects directory found.")
+            return
+        projects = [p.name for p in sorted(projects_dir.iterdir()) if p.is_dir()]
+        if not projects:
+            print("No projects found.")
+            return
+        print("\n".join(projects))
+        return
+    elif args.command in ("annotate", "inspect", "classify", "live", "settings"):
+        # Run the specified script for the given project
+        script_map = {
+            "annotate": "scripts/annotation.py",
+            "inspect": "scripts/inspect_dataset.py",
+            "classify": "scripts/classify_track.py",
+            "live": "scripts/live.py",
+            "settings": "scripts/settings_gui.py",
+        }
+        script_name = script_map[args.command]
+        project_path = Path(os.getcwd()) / "projects" / args.project_name
+        if not project_path.exists():
+            print(f"Project '{args.project_name}' not found.")
+            return
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["BEHAVEAI_PROJECT"] = str(project_path)
+        try:
+            subprocess.run(
+                [sys.executable, "-u", script_name, str(project_path)],
+                env=env,
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"Script exited with code {e.returncode}")
+        except Exception as e:
+            print(f"Failed to run script: {e}")
+        return
+    else:
+        root = tk.Tk()
+        app = ScriptRunnerApp(root)
+        root.mainloop()
+
+
 # --------------------- main ---------------------
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = ScriptRunnerApp(root)
-    root.mainloop()
+    main()
