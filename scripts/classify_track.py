@@ -1314,6 +1314,7 @@ def process_video(file):
             # STAGE 5 — Tracking, rendering, CSV output
             # ================================================================
 
+            LABEL_TYPE = "external"  # "primary", "external"
             # Feed centroids to the Kalman tracker -> {det_idx: track_id}.
             cents = [d["centroid"] for d in processed_detections]
             assignment = tracker.update(cents)
@@ -1368,7 +1369,10 @@ def process_video(file):
                             ]
 
                     # If no secondary to display, draw a single box + label.
-                    if primary_cls in params["primary_classes"]:
+                    if (
+                        LABEL_TYPE == "primary"
+                        and primary_cls in params["primary_classes"]
+                    ):
                         label = f"{tid} {primary_cls.upper()}"
                         label_size, _ = cv2.getTextSize(
                             label,
@@ -1401,6 +1405,42 @@ def process_video(file):
                             cv2.FONT_HERSHEY_SIMPLEX,
                             params["font_size"],
                             primary_col,
+                            params["line_thickness"],
+                            cv2.LINE_AA,
+                        )
+                    elif LABEL_TYPE == "external":
+                        label = f"{tid} {ss_class}"
+                        label_size, _ = cv2.getTextSize(
+                            label,
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            params["font_size"],
+                            params["line_thickness"],
+                        )
+                        label_w, label_h = label_size
+                        cv2.rectangle(
+                            frame,
+                            (
+                                x1 - params["line_thickness"],
+                                y1 - label_h - params["line_thickness"] * 4,
+                            ),
+                            (x1 + label_w + params["line_thickness"] * 2, y1),
+                            (0, 0, 0),
+                            -1,
+                        )
+                        cv2.rectangle(
+                            frame,
+                            (x1, y1),
+                            (x2, y2),
+                            secondary_col,
+                            params["line_thickness"],
+                        )
+                        cv2.putText(
+                            frame,
+                            label,
+                            (x1, y1 - params["line_thickness"] * 2),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            params["font_size"],
+                            secondary_col,
                             params["line_thickness"],
                             cv2.LINE_AA,
                         )
@@ -1569,6 +1609,7 @@ def process_video(file):
                 params["line_thickness"],
             )
 
+            # write the annotated frame to the output video
             writer.write(frame)
 
             if print_tick > params["progress_update"]:
