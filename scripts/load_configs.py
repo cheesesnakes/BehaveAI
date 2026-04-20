@@ -222,6 +222,13 @@ def read_parameters():
             config["DEFAULT"].get("secondary_static_external_model", "").strip()
         )
 
+        # pseudo-labelling parameters
+        params["primary_static_pseudo_labeling"] = config["DEFAULT"].get(
+            "primary_static_pseudo_labeling", False
+        )
+        params["secondary_static_pseudo_labeling"] = config["DEFAULT"].get(
+            "secondary_static_pseudo_labeling", False
+        )
         if (
             len(params["secondary_motion_classes"]) >= 2
             or len(params["secondary_static_classes"]) >= 2

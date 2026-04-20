@@ -628,7 +628,10 @@ def train_models():
     # the secondary annotations share source frames with primary annotations.
 
     # check if external static model is specified, else train
-    if params["primary_static_external_model"] == "":
+    if (
+        params["primary_static_external_model"] == ""
+        or params["primary_static_pseudo_labeling"]
+    ):
         if params["primary_static_classes"][0] != "0":
             maybe_retrain(
                 "models/model_primary_static",
@@ -959,9 +962,9 @@ def process_video(file):
     model_motion = None
 
     # Primary STATIC
-    if (
-        params["primary_static_classes"][0] != "0"
-        and params["primary_static_external_model"] == ""
+    if params["primary_static_classes"][0] != "0" and (
+        params["primary_static_external_model"] == ""
+        or params["primary_static_pseudo_labeling"]
     ):
         weights = params["primary_static_model_path"]  # already ends in best.pt
     else:

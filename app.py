@@ -538,7 +538,10 @@ def main():
     live_parser.add_argument("project_name", help="Name of the project")
     settings_parser = subparsers.add_parser("settings", help="Run settings GUI")
     settings_parser.add_argument("project_name", help="Name of the project")
-
+    pseudo_label_parser = subparsers.add_parser(
+        "pseudo-label", help="Run pseudo-labelling script"
+    )
+    pseudo_label_parser.add_argument("project_name", help="Name of the project")
     args, unknown = parser.parse_known_args()
 
     if args.command == "list-projects":
@@ -562,6 +565,7 @@ def main():
         "settings",
         "regenerate",
         "splice",
+        "pseudo-label",
     ):
         # Run the specified script for the given project
         script_map = {
@@ -572,6 +576,7 @@ def main():
             "settings": "scripts/settings_gui.py",
             "regenerate": "scripts/regenerate_annotations.py",
             "splice": "scripts/splice_clips.py",
+            "pseudo-label": "scripts/pseudolabeller.py",
         }
         script_name = script_map[args.command]
         project_path = Path(os.getcwd()) / "projects" / args.project_name
