@@ -1315,6 +1315,7 @@ def process_video(file):
             # ================================================================
 
             LABEL_TYPE = "external"  # "primary", "external"
+            LABEL_TYPE = "external"  # "primary", "external"
             # Feed centroids to the Kalman tracker -> {det_idx: track_id}.
             cents = [d["centroid"] for d in processed_detections]
             assignment = tracker.update(cents)
@@ -1609,6 +1610,7 @@ def process_video(file):
                 params["line_thickness"],
             )
 
+            # write the annotated frame to the output video
             # write the annotated frame to the output video
             writer.write(frame)
 
