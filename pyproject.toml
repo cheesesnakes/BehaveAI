@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "albumentations>=2.0.8",
     "opencv-python>=4.13.0.92",
     "pandas>=3.0.2",
     "pillow>=12.2.0",

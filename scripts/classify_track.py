@@ -471,11 +471,10 @@ def train_models():
 
     secondary_static_models = None
     secondary_motion_models = None
-
     # ---- hierarchical (secondary) models ------------------------------
     if params["hierarchical_mode"]:
         # train if no external model is spcified
-        if params["secondary_static_external_model"] != "":
+        if params["secondary_static_external_model"] == "":
             # Secondary STATIC classifiers — one YOLO-cls model per primary class.
             secondary_static_models = {}
             static_class_map = [
@@ -548,9 +547,16 @@ def train_models():
                         f"Secondary static model for '{primary_class}' has no "
                         f"weights at {weights_path} — skipping at inference."
                     )
+                print("I'm here")
         else:
-            secondary_static_models = YOLO(
-                params["secondary_static_external_model"], task="classify"
+            print(
+                "Using external secondary static model:",
+                params["secondary_static_external_model"],
+            )
+            from fishial_inference import FishInferenceEngine
+
+            secondary_static_models = FishInferenceEngine.from_bundle(
+                params["secondary_static_external_model"]
             )
 
         # Secondary MOTION classifiers — mirror of the static block.
@@ -1261,7 +1267,10 @@ def process_video(file):
                     def _run(model_dict, crop):
                         if model_dict is None or crop is None or crop.size == 0:
                             return None, None
-                        m = model_dict.get(primary_class)
+                        if not isinstance(model_dict, dict):
+                            m = model_dict
+                        else:
+                            m = model_dict.get(primary_class)
                         if m is None:
                             return None, None
                         res = m.predict(crop, verbose=False)
@@ -1283,11 +1292,14 @@ def process_video(file):
                         params["secondary_static_external_model"] != ""
                         and static_crop is not None
                     ):
-                        cls, conf = _run(secondary_static_models, static_crop)
+                        res = secondary_static_models.predict_single(static_crop)
+                        best_prediction = res.best
+                        cls = best_prediction.name
+                        conf = best_prediction.accuracy
+
                         if cls is not None:
                             det["secondary_static_class"] = cls
                             det["secondary_static_conf"] = conf
-                            print(cls, conf)
 
                     # Motion secondary — only if configured, and needs a motion_image
                     if len(params["secondary_motion_classes"]) >= 2:
@@ -1350,9 +1362,10 @@ def process_video(file):
                         ]
                     if ss_class != "" and ss_class != primary_cls:
                         secondary_cls = ss_class
-                        secondary_col = params["secondary_colors"][
-                            params["secondary_classes"].index(secondary_cls)
-                        ]
+                        if params["secondary_static_external_model"] == "":
+                            secondary_col = params["secondary_colors"][
+                                params["secondary_classes"].index(secondary_cls)
+                            ]
 
                     # If no secondary to display, draw a single box + label.
                     if primary_cls in params["primary_classes"]:
@@ -1597,7 +1610,6 @@ def process_video(file):
 # Train (or verify) models once, then batch-process every file in input/.
 # ============================================================================
 if __name__ == "__main__":
-    print(params["primary_static_external_model"])
     train_models()
 
     input_root = params["input_folder"]
