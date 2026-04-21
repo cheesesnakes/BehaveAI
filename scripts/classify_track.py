@@ -1559,13 +1559,14 @@ def process_video(file):
         if frame_count > params["frame_skip"]:
             frame_count = 0
 
-    # save csv in object
-    data = pd.read_csv(os.path.join(out_dir, base + "_tracking.csv"))
-
     # ---- STAGE 5e: close outputs -------------------------------------
     cap.release()
     writer.release()
     csv_file.close()
+
+    # save csv in object
+    data = pd.read_csv(os.path.join(out_dir, base + "_tracking.csv"))
+
     print(f"Done processing {base} | {current_fps:.1f} FPS")
 
     return data

@@ -563,7 +563,8 @@ def main():
         "classify",
         "live",
         "settings",
-        "regeneratepseudo-label",
+        "regenerate",
+        "pseudo-label",
     ):
         # Run the specified script for the given project
         script_map = {
