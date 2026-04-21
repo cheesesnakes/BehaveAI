@@ -54,7 +54,7 @@ if ($uvPresent -and -not $Reinstall) {
 }
 else {
     if ($Reinstall) { Write-Warn2 "Reinstalling uv (per -Reinstall)" }
-    else            { Write-Warn2 "uv not found — installing" }
+    else            { Write-Warn2 "uv not found, installing" }
 
     # Official Astral install script. It drops uv.exe into
     # %USERPROFILE%\.local\bin and updates PATH for future sessions.
