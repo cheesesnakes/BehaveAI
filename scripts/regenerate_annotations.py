@@ -352,7 +352,7 @@ def regenerate_annotations(config_path):
     base_names = set()
     for base_dir, splits in base_dirs:
         for split in splits:
-            label_dir = os.path.join(base_dir, "labels", split)
+            label_dir = os.path.join("annotations", base_dir, "labels", split)
             if not os.path.exists(label_dir):
                 continue
             for label_file in glob.glob(os.path.join(label_dir, "*.txt")):
@@ -401,20 +401,20 @@ def regenerate_annotations(config_path):
 
         # mask & label paths for both static and motion (may or may not exist)
         static_mask_path = os.path.join(
-            "annot_static", "masks", split, f"{base_name}.mask.txt"
+            "annotations", "annot_static", "masks", split, f"{base_name}.mask.txt"
         )
         motion_mask_path = os.path.join(
-            "annot_motion", "masks", split, f"{base_name}.mask.txt"
+            "annotations", "annot_motion", "masks", split, f"{base_name}.mask.txt"
         )
 
         static_mask_boxes = read_mask_file(static_mask_path)
         motion_mask_boxes = read_mask_file(motion_mask_path)
 
         static_label_path = os.path.join(
-            "annot_static", "labels", split, f"{base_name}.txt"
+            "annotations", "annot_static", "labels", split, f"{base_name}.txt"
         )
         motion_label_path = os.path.join(
-            "annot_motion", "labels", split, f"{base_name}.txt"
+            "annotations", "annot_motion", "labels", split, f"{base_name}.txt"
         )
 
         # -----------------------
@@ -443,7 +443,7 @@ def regenerate_annotations(config_path):
                     )
 
                 static_img_path = os.path.join(
-                    "annot_static", "images", split, f"{base_name}.jpg"
+                    "annotations", "annot_static", "images", split, f"{base_name}.jpg"
                 )
                 os.makedirs(os.path.dirname(static_img_path), exist_ok=True)
                 cv2.imwrite(static_img_path, static_final)
@@ -469,7 +469,7 @@ def regenerate_annotations(config_path):
                     motion_final = apply_blocking_boxes(motion_final, static_boxes)
 
                 motion_img_path = os.path.join(
-                    "annot_motion", "images", split, f"{base_name}.jpg"
+                    "annotations", "annot_motion", "images", split, f"{base_name}.jpg"
                 )
                 os.makedirs(os.path.dirname(motion_img_path), exist_ok=True)
                 cv2.imwrite(motion_img_path, motion_final)
@@ -515,7 +515,6 @@ if __name__ == "__main__":
     if not os.path.exists(config_path):
         print(f"Config file not found: {config_path}")
         sys.exit(1)
-
     # Run regeneration
     start_t = time.time()
     regenerate_annotations(config_path)
