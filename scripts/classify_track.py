@@ -927,15 +927,18 @@ def create_motion_image(prev_frames, gray):
 def process_video(file):
     # ---- STAGE 2a: open inputs and outputs ----------------------------
     # Preserve any subfolder structure from input/ under output/.
-    # e.g.  input/site_A/day_2/clip.mp4
-    #   ->  output/site_A/day_2/clip_detected.mp4
-    #       output/site_A/day_2/clip_tracking.csv
+    # Outputs are now split into two sibling trees:
+    #   output/annotated_videos/<rel_dir>/<base>_detected.mp4
+    #   output/annotated_frames/<rel_dir>/<base>_id<TID>.jpg
+    # The tracking CSV still sits alongside the video.
     rel = os.path.relpath(file, params["input_folder"])
     rel_dir = os.path.dirname(rel)  # "site_A/day_2" or ""
     base = os.path.splitext(os.path.basename(rel))[0]
 
-    out_dir = os.path.join(params["output_folder"], rel_dir)
-    os.makedirs(out_dir, exist_ok=True)
+    video_out_dir = os.path.join(params["output_folder"], "annotated_videos", rel_dir)
+    frames_out_dir = os.path.join(params["output_folder"], "annotated_frames", rel_dir)
+    os.makedirs(video_out_dir, exist_ok=True)
+    os.makedirs(frames_out_dir, exist_ok=True)
 
     cap = cv2.VideoCapture(file)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -945,7 +948,7 @@ def process_video(file):
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * params["scale_factor"])
     fps = cap.get(cv2.CAP_PROP_FPS)
     writer = cv2.VideoWriter(
-        os.path.join(out_dir, base + "_detected.mp4"),
+        os.path.join(video_out_dir, base + "_detected.mp4"),
         cv2.VideoWriter_fourcc(*"mp4v"),
         fps,
         (w, h),
@@ -1008,7 +1011,7 @@ def process_video(file):
         cap.release()
         writer.release()
         try:
-            os.remove(os.path.join(out_dir, base + "_detected.mp4"))
+            os.remove(os.path.join(video_out_dir, base + "_detected.mp4"))
         except OSError:
             pass
         return
@@ -1017,9 +1020,13 @@ def process_video(file):
         params["match_distance_thresh"], params["delete_after_missed"]
     )
 
+    # Track IDs we've already exported a snapshot for. Each new tid triggers
+    # one JPEG save of the current annotated frame.
+    seen_track_ids = set()
+
     prev_frames, frame_idx = None, 0
     csv_file = open(
-        os.path.join(out_dir, base + "_tracking.csv"),
+        os.path.join(video_out_dir, base + "_tracking.csv"),
         "w",
         newline="",
     )
@@ -1325,11 +1332,20 @@ def process_video(file):
             cents = [d["centroid"] for d in processed_detections]
             assignment = tracker.update(cents)
 
+            # Collect new track IDs appearing in this frame so we can save a
+            # single annotated snapshot per individual *after* drawing is done.
+            new_ids_this_frame = []
+
             # Draw each tracked detection on the output frame and log it.
             for idx, det in enumerate(processed_detections):
                 tid = assignment.get(idx, None)
                 if tid is None or tid not in tracker.tracks:
                     continue
+
+                # First time we see this track id -> queue a snapshot.
+                if tid not in seen_track_ids:
+                    seen_track_ids.add(tid)
+                    new_ids_this_frame.append(tid)
 
                 x1, y1, x2, y2 = det["coords"]
                 cx, cy = det["centroid"]
@@ -1535,8 +1551,17 @@ def process_video(file):
             )
 
             # write the annotated frame to the output video
-            # write the annotated frame to the output video
             writer.write(frame)
+
+            # ---- 5d-bis: save one annotated frame per newly-seen ID ---
+            # Done *after* all drawing + HUD so the exported frame is the
+            # same image that gets written to the video.
+            for tid in new_ids_this_frame:
+                snap_path = os.path.join(
+                    frames_out_dir,
+                    f"{base}_id{tid:04d}_frame{frame_idx:06d}.jpg",
+                )
+                cv2.imwrite(snap_path, frame)
 
             if print_tick > params["progress_update"]:
                 elapsed = time.time() - start_time
@@ -1565,7 +1590,7 @@ def process_video(file):
     csv_file.close()
 
     # save csv in object
-    data = pd.read_csv(os.path.join(out_dir, base + "_tracking.csv"))
+    data = pd.read_csv(os.path.join(video_out_dir, base + "_tracking.csv"))
 
     print(f"Done processing {base} | {current_fps:.1f} FPS")
 
