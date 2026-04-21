@@ -563,9 +563,7 @@ def main():
         "classify",
         "live",
         "settings",
-        "regenerate",
-        "splice",
-        "pseudo-label",
+        "regeneratepseudo-label",
     ):
         # Run the specified script for the given project
         script_map = {
@@ -575,7 +573,6 @@ def main():
             "live": "scripts/live.py",
             "settings": "scripts/settings_gui.py",
             "regenerate": "scripts/regenerate_annotations.py",
-            "splice": "scripts/splice_clips.py",
             "pseudo-label": "scripts/pseudolabeller.py",
         }
         script_name = script_map[args.command]
@@ -605,6 +602,23 @@ def main():
         except Exception as e:
             print(f"Failed to run script: {e}")
         return
+    elif args.command == "splice":
+        script_name = "scripts/splice.py"
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        try:
+            # Pass unknown args to the script
+            subprocess.run(
+                [sys.executable, "-u", script_name] + unknown,
+                env=env,
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"Script exited with code {e.returncode}")
+        except Exception as e:
+            print(f"Failed to run script: {e}")
+        return
+
     else:
         root = tk.Tk()
         app = ScriptRunnerApp(root)  # noqa: F841

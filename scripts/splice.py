@@ -75,14 +75,22 @@ def clips():
         reader = csv.DictReader(f)
 
         for row in reader:
-            sample_id = (
-                row["deployment_id"].strip()
-                + row["plot_id"].strip()
-                + row["sample_id"].strip()
-            )
-            sample_s = float(row["clip_time"].split(":")[0]) * 60 + float(
-                row["clip_time"].split(":")[1]
-            )
+            if "deploymen_id" in row.keys():
+                sample_id = (
+                    row["deployment_id"].strip()
+                    + row["plot_id"].strip()
+                    + row["sample_id"].strip()
+                )
+            else:
+                sample_id = row["sample_id"]
+            if "clip_time" in row.keys():
+                sample_s = float(row["clip_time"].split(":")[0]) * 60 + float(
+                    row["clip_time"].split(":")[1]
+                )
+
+            else:
+                sample_s = float(row["start_s"])
+
             clip_info[sample_id] = {
                 "file_name": row["file_name"].strip(),
                 "sample_s": sample_s,
