@@ -1352,9 +1352,16 @@ def process_video(file):
                     label_parts.append(f"{pm_class.upper()}")
                     primary_cls = pm_class
 
+                if params["hierarchical_mode"]:
+                    if ss_class != "" and ss_class != primary_cls:
+                        label_parts.append(f"{ss_class}")
+                    if sm_class != "" and sm_class != primary_cls:
+                        label_parts.append(f"{sm_class}")
+
                 primary_col = params["primary_colors"][
                     params["primary_classes"].index(primary_cls)
                 ]
+
                 secondary_col = (255, 255, 255)
 
                 # ---- 5a: draw bounding box + label ---------------------
@@ -1372,83 +1379,59 @@ def process_video(file):
                                 params["secondary_classes"].index(secondary_cls)
                             ]
 
+                    def _make_label(label, color=primary_col, position="top"):
+
+                        label_size, _ = cv2.getTextSize(
+                            label,
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            params["font_size"],
+                            params["line_thickness"],
+                        )
+                        label_w, label_h = label_size
+
+                        if position == "top":
+                            l_x1 = x1
+                            l_y1 = y1 - label_h - params["line_thickness"] * 2
+                        else:
+                            # bottom of rectangle, plus a small gap
+                            l_x1 = x1
+                            l_y1 = y2 + label_h * 2 + params["line_thickness"] * 2
+
+                        # center large labels if they would overflow the box
+                        if label_w > (x2 - x1):
+                            l_x1 = x1 + (x2 - x1 - label_w) // 2
+
+                        cv2.rectangle(
+                            frame,
+                            (x1, y1),
+                            (x2, y2),
+                            color,
+                            params["line_thickness"],
+                        )
+
+                        cv2.putText(
+                            frame,
+                            label,
+                            (l_x1, l_y1),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            params["font_size"],
+                            color,
+                            params["line_thickness"],
+                            cv2.LINE_AA,
+                        )
+
                     # If no secondary to display, draw a single box + label.
                     if (
                         LABEL_TYPE == "primary"
                         and primary_cls in params["primary_classes"]
                     ):
                         label = f"{tid} {primary_cls.upper()}"
-                        label_size, _ = cv2.getTextSize(
-                            label,
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            params["font_size"],
-                            params["line_thickness"],
-                        )
-                        label_w, label_h = label_size
-                        cv2.rectangle(
-                            frame,
-                            (
-                                x1 - params["line_thickness"],
-                                y1 - label_h - params["line_thickness"] * 4,
-                            ),
-                            (x1 + label_w + params["line_thickness"] * 2, y1),
-                            (0, 0, 0),
-                            -1,
-                        )
-                        cv2.rectangle(
-                            frame,
-                            (x1, y1),
-                            (x2, y2),
-                            primary_col,
-                            params["line_thickness"],
-                        )
-                        cv2.putText(
-                            frame,
-                            label,
-                            (x1, y1 - params["line_thickness"] * 2),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            params["font_size"],
-                            primary_col,
-                            params["line_thickness"],
-                            cv2.LINE_AA,
-                        )
+                        _make_label(label)
                     elif LABEL_TYPE == "external":
                         label = f"{tid} {ss_class}"
-                        label_size, _ = cv2.getTextSize(
-                            label,
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            params["font_size"],
-                            params["line_thickness"],
-                        )
-                        label_w, label_h = label_size
-                        cv2.rectangle(
-                            frame,
-                            (
-                                x1 - params["line_thickness"],
-                                y1 - label_h - params["line_thickness"] * 4,
-                            ),
-                            (x1 + label_w + params["line_thickness"] * 2, y1),
-                            (0, 0, 0),
-                            -1,
-                        )
-                        cv2.rectangle(
-                            frame,
-                            (x1, y1),
-                            (x2, y2),
-                            secondary_col,
-                            params["line_thickness"],
-                        )
-                        cv2.putText(
-                            frame,
-                            label,
-                            (x1, y1 - params["line_thickness"] * 2),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            params["font_size"],
-                            secondary_col,
-                            params["line_thickness"],
-                            cv2.LINE_AA,
-                        )
-                    else:
+                        _make_label(label)
+
+                    if sm_class != "" and sm_class != primary_cls:
                         # Nested boxes: outer = primary, inner = secondary.
                         outer_thickness = params["line_thickness"] + 2
                         cv2.rectangle(
@@ -1458,78 +1441,12 @@ def process_video(file):
                             primary_col,
                             outer_thickness,
                         )
-                        label = f"{tid} {primary_cls.upper()} {secondary_cls}"
-                        label_size, _ = cv2.getTextSize(
-                            label,
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            params["font_size"],
-                            params["line_thickness"],
-                        )
-                        label_w, label_h = label_size
-                        cv2.rectangle(
-                            frame,
-                            (
-                                x1 - params["line_thickness"],
-                                y1 - label_h - params["line_thickness"] * 4,
-                            ),
-                            (x1 + label_w + params["line_thickness"] * 2, y1),
-                            (0, 0, 0),
-                            -1,
-                        )
-                        cv2.rectangle(
-                            frame,
-                            (x1, y1),
-                            (x2, y2),
-                            secondary_col,
-                            params["line_thickness"],
-                        )
-                        cv2.putText(
-                            frame,
-                            label,
-                            (x1, y1 - params["line_thickness"] * 2),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            params["font_size"],
-                            secondary_col,
-                            params["line_thickness"],
-                            cv2.LINE_AA,
-                        )
+                        label = f"{sm_class.upper()}"
+                        _make_label(label, color=secondary_col, position="bottom")
                 else:
                     # Flat mode — single box, primary label only.
                     label = f"{tid} {primary_cls}"
-                    label_size, _ = cv2.getTextSize(
-                        label,
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        params["font_size"],
-                        params["line_thickness"],
-                    )
-                    label_w, label_h = label_size
-                    cv2.rectangle(
-                        frame,
-                        (
-                            x1 - params["line_thickness"],
-                            y1 - label_h - params["line_thickness"] * 4,
-                        ),
-                        (x1 + label_w + params["line_thickness"] * 2, y1),
-                        (0, 0, 0),
-                        -1,
-                    )
-                    cv2.rectangle(
-                        frame,
-                        (x1, y1),
-                        (x2, y2),
-                        primary_col,
-                        params["line_thickness"],
-                    )
-                    cv2.putText(
-                        frame,
-                        label,
-                        (x1, y1 - params["line_thickness"] * 3),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        params["font_size"],
-                        primary_col,
-                        params["line_thickness"],
-                        cv2.LINE_AA,
-                    )
+                    _make_label(label)
 
                 # ---- 5b: draw the KF motion vector ---------------------
                 if tid in tracker.tracks:
