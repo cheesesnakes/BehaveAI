@@ -855,53 +855,21 @@ class SettingsEditorApp(tk.Tk):
             tab3, text="use_ncnn", variable=self.use_ncnn_var, command=self._set_dirty
         ).grid(row=7, column=0, sticky="w", padx=8, pady=(8, 0))
 
-        ttk.Label(tab3, text="Primary confidence thresh").grid(
-            row=8, column=0, sticky="w", padx=8, pady=(6, 0)
-        )
-        self.primary_conf_var = tk.DoubleVar(value=0.5)
-        ttk.Spinbox(
+        self.pseudo_labeling_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
             tab3,
-            from_=0.0,
-            to=1.0,
-            increment=0.01,
-            textvariable=self.primary_conf_var,
-            width=6,
+            text="Pseudo-labeling",
+            variable=self.pseudo_labeling_var,
             command=self._set_dirty,
-        ).grid(row=8, column=1, sticky="w", padx=8)
-
-        ttk.Label(tab3, text="Secondary confidence thresh").grid(
-            row=9, column=0, sticky="w", padx=8, pady=(6, 0)
-        )
-        self.secondary_conf_var = tk.DoubleVar(value=0.5)
-        ttk.Spinbox(
-            tab3,
-            from_=0.0,
-            to=1.0,
-            increment=0.01,
-            textvariable=self.secondary_conf_var,
-            width=6,
-            command=self._set_dirty,
-        ).grid(row=9, column=1, sticky="w", padx=8)
-
-        ttk.Label(tab3, text="Dominant source").grid(
-            row=10, column=0, sticky="w", padx=8, pady=(8, 0)
-        )
-        self.dominant_source_var = tk.StringVar(value="confidence")
-        ttk.Combobox(
-            tab3,
-            values=["confidence", "motion", "static"],
-            textvariable=self.dominant_source_var,
-            state="readonly",
-        ).grid(row=10, column=1, sticky="w", padx=8, pady=(8, 0))
-        self.dominant_source_var.trace_add("write", lambda *a: self._set_dirty())
+        ).grid(row=9, column=0, sticky="w", padx=8, pady=(8, 0))
 
         self.use_ncnn_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             tab3, text="use_ncnn", variable=self.use_ncnn_var, command=self._set_dirty
-        ).grid(row=11, column=0, sticky="w", padx=8, pady=(8, 0))
+        ).grid(row=10, column=0, sticky="w", padx=8, pady=(8, 0))
 
         ttk.Label(tab3, text="Primary confidence thresh").grid(
-            row=12, column=0, sticky="w", padx=8, pady=(6, 0)
+            row=11, column=0, sticky="w", padx=8, pady=(6, 0)
         )
         self.primary_conf_var = tk.DoubleVar(value=0.5)
         ttk.Spinbox(
@@ -912,10 +880,10 @@ class SettingsEditorApp(tk.Tk):
             textvariable=self.primary_conf_var,
             width=6,
             command=self._set_dirty,
-        ).grid(row=12, column=1, sticky="w", padx=8)
+        ).grid(row=11, column=1, sticky="w", padx=8)
 
         ttk.Label(tab3, text="Secondary confidence thresh").grid(
-            row=13, column=0, sticky="w", padx=8, pady=(6, 0)
+            row=12, column=0, sticky="w", padx=8, pady=(6, 0)
         )
         self.secondary_conf_var = tk.DoubleVar(value=0.5)
         ttk.Spinbox(
@@ -926,10 +894,10 @@ class SettingsEditorApp(tk.Tk):
             textvariable=self.secondary_conf_var,
             width=6,
             command=self._set_dirty,
-        ).grid(row=13, column=1, sticky="w", padx=8)
+        ).grid(row=12, column=1, sticky="w", padx=8)
 
         ttk.Label(tab3, text="Dominant source").grid(
-            row=14, column=0, sticky="w", padx=8, pady=(8, 0)
+            row=13, column=0, sticky="w", padx=8, pady=(8, 0)
         )
         self.dominant_source_var = tk.StringVar(value="confidence")
         ttk.Combobox(
@@ -937,7 +905,7 @@ class SettingsEditorApp(tk.Tk):
             values=["confidence", "motion", "static"],
             textvariable=self.dominant_source_var,
             state="readonly",
-        ).grid(row=14, column=1, sticky="w", padx=8, pady=(8, 0))
+        ).grid(row=13, column=1, sticky="w", padx=8, pady=(8, 0))
         self.dominant_source_var.trace_add("write", lambda *a: self._set_dirty())
 
         # TAB 4: Tracking
@@ -1556,6 +1524,9 @@ class SettingsEditorApp(tk.Tk):
         new_default["secondary_static_external_model"] = (
             self.secondary_static_ext_var.get()
         )
+
+        # pseudo labeling
+        new_default["primary_static_pseudo_labeling"] = self.pseudo_labeling_var.get()
 
         # tracking
         new_default["match_distance_thresh"] = str(self.match_distance_var.get())
