@@ -75,7 +75,7 @@ def clips():
         reader = csv.DictReader(f)
 
         for row in reader:
-            if "deploymen_id" in row.keys():
+            if "deployment_id" in row.keys():
                 sample_id = (
                     row["deployment_id"].strip()
                     + row["plot_id"].strip()
@@ -111,8 +111,7 @@ def cut_clip():
         print(f"Processing row {i}: {row}")
         file_name = row["file_name"].strip()
         start_s = float(row["sample_s"])
-        if file_name[-4:] == SOURCE_EXT:
-            file_name = file_name[:-4]
+        file_name = file_name[:-4]
         source = f"{SOURCE_DIR}/{file_name}{SOURCE_EXT}"
 
         if not os.path.exists(source):
