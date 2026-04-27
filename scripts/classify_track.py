@@ -505,7 +505,8 @@ def train_models():
 
                     # Not enough annotations -> leave weights absent, skip load.
                     n_image = count_images_in_dataset(data_dir)
-                    if n_image < 2:
+                    
+                    if n_image[0] < 2:
                         print(
                             f"Error: Not enough images to train secondary static model "
                             f"for primary class '{primary_class}' (found {n_image}, "
@@ -547,7 +548,6 @@ def train_models():
                             f"Secondary static model for '{primary_class}' has no "
                             f"weights at {weights_path} — skipping at inference."
                         )
-                    print("I'm here")
         else:
             print(
                 "Using external secondary static model:",
