@@ -350,15 +350,14 @@ def maybe_retrain(
 
         # If the count changed, ask the user whether to retrain.
         if train != last_count:
-            root = tk.Tk()
-            root.withdraw()
-            msg = (
+            
+            print(
                 f"New annotations detected for '{model_type}' model.\n"
                 f"Training image count changed from {last_count} to {train}.\n\n"
-                "Do you want to re-train this model?"
+                "Retraining the model."
             )
-            response = messagebox.askyesno("Retrain model?", msg)
-            root.destroy()
+
+            response = True 
 
             if response:
                 # Backup the whole model dir so we never lose old weights.
