@@ -542,12 +542,12 @@ def train_models():
                                 f"Warning: failed to load secondary static model for "
                                 f"'{primary_class}': {e} — skipping at inference."
                             )
-                else:
-                    print(
-                        f"Secondary static model for '{primary_class}' has no "
-                        f"weights at {weights_path} — skipping at inference."
-                    )
-                print("I'm here")
+                    else:
+                        print(
+                            f"Secondary static model for '{primary_class}' has no "
+                            f"weights at {weights_path} — skipping at inference."
+                        )
+                    print("I'm here")
         else:
             print(
                 "Using external secondary static model:",
