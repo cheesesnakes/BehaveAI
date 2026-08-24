@@ -350,15 +350,14 @@ def maybe_retrain(
 
         # If the count changed, ask the user whether to retrain.
         if train != last_count:
-            root = tk.Tk()
-            root.withdraw()
-            msg = (
+            
+            print(
                 f"New annotations detected for '{model_type}' model.\n"
                 f"Training image count changed from {last_count} to {train}.\n\n"
-                "Do you want to re-train this model?"
+                "Retraining the model."
             )
-            response = messagebox.askyesno("Retrain model?", msg)
-            root.destroy()
+
+            response = True 
 
             if response:
                 # Backup the whole model dir so we never lose old weights.
@@ -505,7 +504,8 @@ def train_models():
 
                     # Not enough annotations -> leave weights absent, skip load.
                     n_image = count_images_in_dataset(data_dir)
-                    if n_image < 2:
+                    
+                    if n_image[0] < 2:
                         print(
                             f"Error: Not enough images to train secondary static model "
                             f"for primary class '{primary_class}' (found {n_image}, "
@@ -542,12 +542,11 @@ def train_models():
                                 f"Warning: failed to load secondary static model for "
                                 f"'{primary_class}': {e} — skipping at inference."
                             )
-                else:
-                    print(
-                        f"Secondary static model for '{primary_class}' has no "
-                        f"weights at {weights_path} — skipping at inference."
-                    )
-                print("I'm here")
+                    else:
+                        print(
+                            f"Secondary static model for '{primary_class}' has no "
+                            f"weights at {weights_path} — skipping at inference."
+                        )
         else:
             print(
                 "Using external secondary static model:",
