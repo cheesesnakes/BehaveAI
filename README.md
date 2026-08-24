@@ -28,11 +28,11 @@ The framework also supports hierarchical models (e.g. detect something from it's
 
 ## What's new in this fork
 
-This fork re-packages BehaveAI as a standard Python project managed by [`uv`](https://docs.astral.sh/uv/), and adds a pseudo-labelling workflow so you can bootstrap annotations from an existing pretrained detector.
+This fork re-packages BehaveAI as a standard Python project managed by [`uv`](https://docs.astral.sh/uv/), adds a pseudo-labelling workflow so you can bootstrap annotations from an existing pretrained detector, and exposes every stage of the pipeline as a subcommand of `app.py` so it can be scripted without the launcher GUI. See the [Command-line interface](#command-line-interface) reference below.
 
 ### Pseudo-labeller for the primary static stream
 
-`scripts/pseudo_label.py` is a one-shot script that runs a pretrained YOLO detector over the videos in your `clips_dir` and writes out BehaveAI-compatible annotations (images + YOLO-format `.txt` labels) into `annot_static/images/{train,val}/` and `annot_static/labels/{train,val}/`. These annotations then appear in the standard annotation GUI exactly like hand-drawn ones, ready to be reviewed and corrected.
+`scripts/pseudolabeller.py` is a one-shot script that runs a pretrained YOLO detector over the videos in your `clips_dir` and writes out BehaveAI-compatible annotations (images + YOLO-format `.txt` labels) into `annot_static/images/{train,val}/` and `annot_static/labels/{train,val}/`. These annotations then appear in the standard annotation GUI exactly like hand-drawn ones, ready to be reviewed and corrected.
 
 Typical use case: you have a YOLO26 "fish" detector and a few hours of footage. Rather than annotating from zero, run the pseudo-labeller, open the annotation GUI, and spend your time correcting errors instead of drawing every box.
 
@@ -40,11 +40,48 @@ The pseudo-labeller assumes the external model's class IDs match the order of `p
 
 ```bash
 # after editing config.ini to point primary_static_external_model at your .pt file
-uv run python scripts/pseudo_label.py --sample-every 30 --dry-run     # preview
-uv run python scripts/pseudo_label.py --sample-every 30               # run it
+uv run python app.py pseudo-label my_project --sample-every 30 --dry-run   # preview
+uv run python app.py pseudo-label my_project --sample-every 30             # run it
 ```
 
+Options:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `project_name` | *(required)* | Name of an existing project under `projects/`. |
+| `--sample-every N` | `30` | Keep one frame every `N` frames. |
+| `--max-per-video K` | `0` | Cap frames kept per video (`0` = unlimited). |
+| `--val-frequency F` | from `config.ini` | Override the project's `val_frequency` train/val split. |
+| `--conf C` | from `config.ini` (`pseudo_label_conf`) | Confidence threshold for keeping detections. |
+| `--dry-run` | off | Report what would be written without touching disk. |
+
 Once you're happy with the corrected annotations, clear `primary_static_external_model` in `config.ini` so the next training run uses your (corrected) pseudo-labels as ground truth.
+
+### Clip splicing helper
+
+`scripts/splice.py` cuts fixed-length sample clips out of long source videos and can optionally concatenate them into a single review video — handy for building a `clips_dir` out of hours of raw footage.
+
+```bash
+# take a 2-minute clip from each video at a time given in the CSV
+uv run python app.py splice --source-dir /data/raw --csv samples.csv
+
+# no CSV: take one clip from every video at a random offset in the first 9 minutes
+uv run python app.py splice --source-dir /data/raw --source-ext .mp4 --concatenate
+```
+
+Options:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--source-dir DIR` | *(required)* | Directory containing the source videos. |
+| `--csv PATH` | none | CSV of clip start times. If omitted or missing, every video in `--source-dir` is sampled at a random offset. |
+| `--source-ext EXT` | `.mkv` | Extension of the source videos. |
+| `--clip-duration S` | `120` | Clip length in seconds. |
+| `--work-dir DIR` | `samples` | Where the individual clips are written. |
+| `--output-file NAME` | `final_output.mp4` | Filename for the concatenated video. |
+| `--concatenate` | off | Also join all clips into one video. |
+
+The CSV needs a `file_name` column, an id column (`sample_id`, or `deployment_id` + `plot_id` + `sample_id`), and a start time as either `clip_time` (`MM:SS`) or `start_s` (seconds). Splicing shells out to `ffmpeg`, so make sure it's on your `PATH`.
 
 ### Use an external pretrained model instead of training from annotations
 
@@ -59,6 +96,8 @@ pseudo_label_conf = 0.6
 ```
 
 When either path is set, `classify_track.py` loads that model for inference instead of retraining from `annot_static/`. Accepted formats: `.pt`, `.torchscript`, `.onnx`, `.engine`, or an NCNN folder. The paths are also exposed as Browse-able fields in the Settings GUI (Tab 3).
+
+`secondary_static_external_model` additionally accepts a self-contained [Fishial](https://github.com/fishial/fish-identification) TorchScript bundle, which is loaded through `scripts/fishial_inference.py` (`FishInferenceEngine.from_bundle`) rather than Ultralytics. The bundle must carry its model, natural centroids, and labels; species scoring defaults to the `natural_centroid` head. This module is a library, not a command — there is nothing to run directly.
 
 ### `uv`-based project, with one-command installers
 
@@ -126,6 +165,45 @@ source .venv/bin/activate && python app.py
 # Windows
 .\.venv\Scripts\Activate.ps1
 python app.py
+```
+
+## Command-line interface
+
+Running `app.py` with no arguments opens the launcher GUI. Every stage of the pipeline is also available as a subcommand, which is what you want for headless machines, batch jobs, and remote sessions:
+
+```bash
+uv run python app.py <command> [project_name] [options]
+```
+
+| Command | Arguments | What it does |
+| --- | --- | --- |
+| *(none)* | — | Launch the Tkinter launcher GUI. |
+| `list-projects` | — | Print the names of the project folders under `projects/`, one per line. |
+| `annotate` | `project_name` | Open the annotation GUI (`scripts/annotation.py`). |
+| `regenerate` | `project_name` | Rebuild annotation images from the stored library (`scripts/regenerate_annotations.py`). |
+| `inspect` | `project_name` | Open the dataset inspector (`scripts/inspect_dataset.py`). |
+| `classify` | `project_name` | Train (if needed) then run detection, classification and tracking (`scripts/classify_track.py`). |
+| `live` | `project_name` | Run live/edge inference from a camera (`scripts/live.py`). |
+| `settings` | `project_name` | Open the settings GUI for the project's `config.ini` (`scripts/settings_gui.py`). |
+| `pseudo-label` | `project_name` | Bootstrap annotations from an external detector (`scripts/pseudolabeller.py`). See [Pseudo-labeller](#pseudo-labeller-for-the-primary-static-stream). |
+| `splice` | *(no project)* | Cut and concatenate sample clips from long videos (`scripts/splice.py`). See [Clip splicing helper](#clip-splicing-helper). |
+
+Notes:
+
+- **Run from the repo root.** Projects are resolved as `./projects/<project_name>`, and the launcher refuses to start if that folder doesn't exist. Create the project in the GUI first.
+- **Extra flags are forwarded** to the underlying script, so `app.py pseudo-label my_project --sample-every 15 --dry-run` and `app.py splice --source-dir /data/raw` both work.
+- **`splice` takes no project name** — it operates on a source directory, not a project.
+- The launcher exports `BEHAVEAI_PROJECT` and passes the resolved project path to the child script, so the scripts can also be invoked directly if you prefer, e.g. `uv run python scripts/annotation.py projects/my_project`.
+- `annotate` accepts a `--file_name` flag, but it is consumed by the launcher and not currently passed through to the annotation script, so it has no effect.
+
+Examples:
+
+```bash
+uv run python app.py list-projects
+uv run python app.py settings my_project        # edit config.ini
+uv run python app.py annotate my_project        # draw/correct boxes
+uv run python app.py classify my_project        # train + track
+uv run python app.py live my_project            # camera inference
 ```
 
 ## User guide
