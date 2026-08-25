@@ -1544,6 +1544,13 @@ class DatasetInspectorTk:
         )
         self.seek.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
+        # current/total counter, directly under the seek scale
+        self.counter_var = tk.StringVar()
+        self.counter_label = tk.Label(
+            self.bottom_frame, textvariable=self.counter_var, anchor="e"
+        )
+        self.counter_label.pack(fill="x", padx=4, pady=(2, 0))
+
         # status label with current basename
         self.status_var = tk.StringVar()
         self.status_label = tk.Label(
@@ -1568,7 +1575,7 @@ class DatasetInspectorTk:
                 color_hex = "#%02x%02x%02x" % (bgr[2], bgr[1], bgr[0])
             btn = tk.Button(
                 self.buttons_frame,
-                text="{} ({})".format(name, primary_classes_info[idx][0]),
+                text=f"{name} ({primary_classes_info[idx][0]})",
                 width=12,
                 relief="raised",
                 command=lambda i=idx: self.select_primary(i),
@@ -1586,7 +1593,7 @@ class DatasetInspectorTk:
                     color_hex = "#%02x%02x%02x" % (bgr[2], bgr[1], bgr[0])
                 btn = tk.Button(
                     self.buttons_frame,
-                    text="{} ({})".format(name, secondary_classes_info[idx][0]),
+                    text=f"{name} ({secondary_classes_info[idx][0]})",
                     width=12,
                     relief="raised",
                     command=lambda i=idx: self.select_secondary(i),
@@ -1690,6 +1697,11 @@ class DatasetInspectorTk:
             self.status_var.set(items[current_idx]["basename"])
         except Exception:
             self.status_var.set("")
+        try:
+            total = len(items)
+            self.counter_var.set(f"{current_idx + 1:,} / {total:,}")
+        except Exception:
+            self.counter_var.set("")
 
     def canvas_to_video(self, canvas_point):
         # Map canvas coords (event.x,event.y) -> video pixel coords (vx,vy)
