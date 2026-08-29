@@ -38,8 +38,6 @@ import glob
 import os
 import shutil
 import time
-import tkinter as tk
-from tkinter import messagebox
 
 import cv2
 import numpy as np
@@ -350,14 +348,13 @@ def maybe_retrain(
 
         # If the count changed, ask the user whether to retrain.
         if train != last_count:
-            
             print(
                 f"New annotations detected for '{model_type}' model.\n"
                 f"Training image count changed from {last_count} to {train}.\n\n"
                 "Retraining the model."
             )
 
-            response = True 
+            response = True
 
             if response:
                 # Backup the whole model dir so we never lose old weights.
@@ -380,11 +377,29 @@ def maybe_retrain(
                 model = YOLO(start_weights)
                 model.train(
                     data=yaml_path,
-                    epochs=epochs,
-                    imgsz=imgsz,
+                    epochs=epochs,  # Keep your variable (e.g., 150)
+                    imgsz=imgsz,  # Keep your variable (e.g., 640)
                     project=project_path,
                     name="train",
                     exist_ok=True,
+                    # ===== ADD THESE RECOMMENDED PARAMETERS BELOW =====
+                    # --- Core Training ---
+                    batch=16,  # Set as high as your GPU allows (16, 32, 64)
+                    device=0,  # GPU ID (0 for first GPU, or 'cpu' for CPU)
+                    # --- Optimizer & Learning Rate ---
+                    optimizer="AdamW",  # 'AdamW' is great for fine-tuning on custom data
+                    lr0=0.001,  # Initial learning rate (0.001 for AdamW)
+                    lrf=0.01,  # Final learning rate factor (lr0 * lrf = final LR)
+                    # --- Augmentation (Tweaked for BehaveAI's motion encoding) ---
+                    mosaic=1.0,  # Keep mosaic enabled (1.0 = 100% probability)
+                    close_mosaic=10,  # Disable mosaic in the last 10 epochs for stability
+                    scale=0.0,  # REDUCE heavy scaling (protects motion-color gradients)
+                    translate=0.0,  # REDUCE heavy translation (preserves motion cues)
+                    fliplr=0.5,  # Keep horizontal flip (safe, doesn't distort motion)
+                    # --- Loss Weights (optional but good defaults) ---
+                    box=7.5,  # Box loss gain
+                    cls=0.5,  # Classification loss gain
+                    dfl=1.5,  # Distribution Focal Loss gain
                 )
                 try:
                     move_to_expected(project_path, run_name="train", runs_root="runs")
@@ -423,11 +438,29 @@ def maybe_retrain(
         model = YOLO(classifier)
         model.train(
             data=yaml_path,
-            epochs=epochs,
-            imgsz=imgsz,
+            epochs=epochs,  # Keep your variable (e.g., 150)
+            imgsz=imgsz,  # Keep your variable (e.g., 640)
             project=project_path,
             name="train",
             exist_ok=True,
+            # ===== ADD THESE RECOMMENDED PARAMETERS BELOW =====
+            # --- Core Training ---
+            batch=16,  # Set as high as your GPU allows (16, 32, 64)
+            device=0,  # GPU ID (0 for first GPU, or 'cpu' for CPU)
+            # --- Optimizer & Learning Rate ---
+            optimizer="AdamW",  # 'AdamW' is great for fine-tuning on custom data
+            lr0=0.001,  # Initial learning rate (0.001 for AdamW)
+            lrf=0.01,  # Final learning rate factor (lr0 * lrf = final LR)
+            # --- Augmentation (Tweaked for BehaveAI's motion encoding) ---
+            mosaic=1.0,  # Keep mosaic enabled (1.0 = 100% probability)
+            close_mosaic=10,  # Disable mosaic in the last 10 epochs for stability
+            scale=0.0,  # REDUCE heavy scaling (protects motion-color gradients)
+            translate=0.0,  # REDUCE heavy translation (preserves motion cues)
+            fliplr=0.5,  # Keep horizontal flip (safe, doesn't distort motion)
+            # --- Loss Weights (optional but good defaults) ---
+            box=7.5,  # Box loss gain
+            cls=0.5,  # Classification loss gain
+            dfl=1.5,  # Distribution Focal Loss gain
         )
         try:
             move_to_expected(project_path, run_name="train", runs_root="runs")
@@ -504,7 +537,7 @@ def train_models():
 
                     # Not enough annotations -> leave weights absent, skip load.
                     n_image = count_images_in_dataset(data_dir)
-                    
+
                     if n_image[0] < 2:
                         print(
                             f"Error: Not enough images to train secondary static model "
@@ -674,9 +707,9 @@ def iou(box1, box2):
     prop1 = inter / area1
     prop2 = inter / area2
     if prop1 > prop2:
-        return prop1 if prop1 > 0 else 0
+        return max(0, prop1)
     else:
-        return prop2 if prop2 > 0 else 0
+        return max(0, prop2)
 
 
 # ============================================================================
@@ -1199,15 +1232,7 @@ def process_video(file):
                         elif (
                             det["source"] == "static"
                             and params["dominant_source"] == "static"
-                        ):
-                            md["primary_class_combined"] = md["primary_class"]
-                            md["primary_conf_combined"] = md["primary_conf"]
-                            md["primary_class"] = det["primary_class"]
-                            md["primary_conf"] = det["primary_conf"]
-                            md["coords"] = det["coords"]
-                            md["centroid"] = (cx, cy)
-                            md["source"] = det["source"]
-                        elif (
+                        ) or (
                             det["source"] == "motion"
                             and params["dominant_source"] == "motion"
                         ):
