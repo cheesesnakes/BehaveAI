@@ -662,8 +662,11 @@ def train_models():
     # check if external static model is specified, else train
     if (
         params["primary_static_external_model"] == ""
-        or params["primary_static_pseudo_labeling"]
+        or params["primary_static_pseudo_labeling"] == "True"
     ):
+        print(
+            "Training primary model!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        )
         if params["primary_static_classes"][0] != "0":
             maybe_retrain(
                 "models/model_primary_static",
