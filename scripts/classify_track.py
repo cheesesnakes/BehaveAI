@@ -410,6 +410,7 @@ def maybe_retrain(
                 scale=0.0,  # protects motion-colour gradients
                 translate=0.0,  # preserves motion cues
                 fliplr=0.5,
+                patience=10,
                 # --- Loss Weights ---
                 box=7.5,
                 cls=0.5,
@@ -470,6 +471,7 @@ def maybe_retrain(
             scale=0.0,
             translate=0.0,
             fliplr=0.5,
+            patience=10,
             # --- Loss Weights ---
             box=7.5,
             cls=0.5,
@@ -674,7 +676,7 @@ def train_models():
     # check if external static model is specified, else train
     if (
         params["primary_static_external_model"] == ""
-        or params["primary_static_pseudo_labeling"] == "False" == "True"
+        or params["primary_static_pseudo_labeling"] == "True"
     ):
         print("Training primary static model")
         if params["primary_static_classes"][0] != "0":
@@ -1232,7 +1234,7 @@ def process_video(file):
     # Primary STATIC
     if params["primary_static_classes"][0] != "0" and (
         params["primary_static_external_model"] == ""
-        or params["primary_static_pseudo_labeling"] == "False"
+        or params["primary_static_pseudo_labeling"] == "True"
     ):
         weights = params["primary_static_model_path"]  # already ends in best.pt
     else:
