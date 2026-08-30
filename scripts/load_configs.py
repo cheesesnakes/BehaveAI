@@ -398,6 +398,7 @@ def read_parameters():
         params["motion_threshold"] = -1 * int(
             config["DEFAULT"].get("motion_threshold", "0")
         )
+        params["tracker_type"] = config["kalman"].get("tracker_type", "ocsort")
 
     except KeyError as e:
         raise KeyError(f"Missing configuration parameter: {e}")

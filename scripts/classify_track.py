@@ -674,7 +674,7 @@ def train_models():
     # check if external static model is specified, else train
     if (
         params["primary_static_external_model"] == ""
-        or params["primary_static_pseudo_labeling"] == "True"
+        or params["primary_static_pseudo_labeling"] == "False" == "True"
     ):
         print("Training primary static model")
         if params["primary_static_classes"][0] != "0":
@@ -1165,6 +1165,7 @@ def build_tracker(fps):
     tracker_type = params.get("tracker_type", "builtin")
 
     if tracker_type != "builtin" and BoxMOTTracker is not None:
+        print(f"Using {tracker_type} tracker.")
         return BoxMOTTracker(
             tracker_type=tracker_type,
             class_names=params["primary_classes"],
@@ -1231,7 +1232,7 @@ def process_video(file):
     # Primary STATIC
     if params["primary_static_classes"][0] != "0" and (
         params["primary_static_external_model"] == ""
-        or params["primary_static_pseudo_labeling"]
+        or params["primary_static_pseudo_labeling"] == "False"
     ):
         weights = params["primary_static_model_path"]  # already ends in best.pt
     else:
