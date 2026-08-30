@@ -311,12 +311,14 @@ def read_parameters():
             config["DEFAULT"].get("secondary_static_external_model", "").strip()
         )
 
-        # pseudo-labelling parameters
-        params["primary_static_pseudo_labeling"] = config["DEFAULT"].get(
-            "primary_static_pseudo_labeling", False
+        # pseudo-labelling parameters. Parsed as real booleans — these used to
+        # be compared as raw strings at the call sites, which is how the
+        # `== "False" == "True"` chained-comparison bug got in.
+        params["primary_static_pseudo_labeling"] = _cfg_bool(
+            config["DEFAULT"].get("primary_static_pseudo_labeling", "false"), False
         )
-        params["secondary_static_pseudo_labeling"] = config["DEFAULT"].get(
-            "secondary_static_pseudo_labeling", False
+        params["secondary_static_pseudo_labeling"] = _cfg_bool(
+            config["DEFAULT"].get("secondary_static_pseudo_labeling", "false"), False
         )
         if (
             len(params["secondary_motion_classes"]) >= 2
@@ -376,6 +378,22 @@ def read_parameters():
             f"{ANNOTATION_FOLDER}/motion_annotations.yaml"
         )
 
+        # ---- local vs external primary static model -------------------
+        # ONE decision, consumed by both train_models() and process_video().
+        # Previously each computed its own version of this and they disagreed:
+        # training was skipped because an external model was configured, while
+        # inference still looked for the local weights that were never built,
+        # so the static stream was silently dropped from every video.
+        #
+        #   no external model            -> train and use the local model
+        #   external model, no pseudo    -> use the external model directly
+        #   external model + pseudo      -> the external model labels the data,
+        #                                   so a local model is trained and used
+        params["use_local_static_model"] = (
+            params["primary_static_external_model"] == ""
+            or params["primary_static_pseudo_labeling"]
+        )
+
         params["ignore_secondary"] = [
             name.strip() for name in config["DEFAULT"]["ignore_secondary"].split(",")
         ]
@@ -390,6 +408,21 @@ def read_parameters():
         )
         params["secondary_epochs"] = int(
             config["DEFAULT"].get("secondary_epochs", "50")
+        )
+
+        # ---- image sizes ----------------------------------------------
+        # Training resolution for the primary detectors and the secondary
+        # crop classifiers. These were previously hardcoded to 640 and 224 at
+        # the maybe_retrain() call sites, so any value set in the INI was
+        # silently ignored.
+        params["primary_imgsz"] = int(config["DEFAULT"].get("primary_imgsz", "640"))
+        params["secondary_imgsz"] = int(config["DEFAULT"].get("secondary_imgsz", "224"))
+        # Resolution used at INFERENCE. Defaults to the training resolution,
+        # because a detector evaluated at a different scale than it was
+        # trained at loses accuracy on small objects. Override only if you
+        # know why you want them to differ.
+        params["inference_imgsz"] = int(
+            config["DEFAULT"].get("inference_imgsz", str(params["primary_imgsz"]))
         )
 
         if params["hierarchical_mode"]:
@@ -484,9 +517,34 @@ def read_parameters():
         params["measurement_noise"] = float(
             config["kalman"].get("measurement_noise", "0.1")
         )
-        params["motion_threshold"] = -1 * int(
-            config["DEFAULT"].get("motion_threshold", "0")
+        # motion_threshold is a NEGATIVE offset applied before the gain, so it
+        # acts as a noise floor: a difference below motion_threshold/gain is
+        # suppressed. Historically it was written under [kalman] but read from
+        # [DEFAULT] — configparser propagates DEFAULT keys into sections, never
+        # the reverse, so the [kalman] value was invisible and always resolved
+        # to 0. Accept it from either place.
+        _mt = config["DEFAULT"].get("motion_threshold", None)
+        if _mt is None and config.has_section("kalman"):
+            _mt = config["kalman"].get("motion_threshold", None)
+        params["motion_threshold"] = -1 * int(_mt if _mt is not None else 0)
+
+        # ---- builtin tracker knobs ------------------------------------
+        # Only used when tracker_type = builtin. Read from [kalman], which is
+        # where the rest of the builtin tracker's settings live.
+        _kal = config["kalman"] if config.has_section("kalman") else {}
+        params["tracker_iou_weight"] = float(_kal.get("tracker_iou_weight", "0.4"))
+        params["tracker_class_penalty"] = float(
+            _kal.get("tracker_class_penalty", "2.0")
         )
+
+        # ---- training hardware ----------------------------------------
+        # Previously hardcoded as batch=16, device=0 inside maybe_retrain().
+        # batch matters a lot once primary_imgsz goes up: activation memory
+        # scales with imgsz^2, so 1280 needs roughly 4x what 640 did.
+        params["train_batch"] = int(config["DEFAULT"].get("train_batch", "16"))
+        params["train_device"] = config["DEFAULT"].get("train_device", "0").strip()
+
+        params["val_frequency"] = float(config["DEFAULT"].get("val_frequency", "0.2"))
 
         # ---- tracker block --------------------------------------------
         params["tracker"] = read_tracker_params(config)
@@ -571,6 +629,30 @@ def validate_configuration(params):
         raise ValueError("static_blocks_motion must be 'true' or 'false'")
     if params["save_empty_frames"] not in ("true", "false"):
         raise ValueError("save_empty_frames must be 'true' or 'false'")
+
+    # ---- image sizes --------------------------------------------------
+    for key in ("primary_imgsz", "secondary_imgsz", "inference_imgsz"):
+        v = params[key]
+        if v < 32 or v % 32 != 0:
+            raise ValueError(
+                f"{key} must be a positive multiple of 32 (got {v}). YOLO's "
+                f"stride is 32; other values are silently rounded."
+            )
+    if params["inference_imgsz"] != params["primary_imgsz"]:
+        print(
+            f"Warning: inference_imgsz ({params['inference_imgsz']}) differs from "
+            f"primary_imgsz ({params['primary_imgsz']}). Detectors lose accuracy "
+            f"on small objects when evaluated at a different scale than they "
+            f"were trained at."
+        )
+
+    # ---- training + secondary thresholds ------------------------------
+    if params["train_batch"] < 1:
+        raise ValueError("train_batch must be at least 1")
+    if not 0.0 <= params["secondary_conf_thresh"] < 1.0:
+        raise ValueError("secondary_conf_thresh must be in [0, 1)")
+    if not 0.0 <= params["val_frequency"] < 1.0:
+        raise ValueError("val_frequency must be in [0, 1)")
 
     # ---- tracker block ------------------------------------------------
     tp = params["tracker"]

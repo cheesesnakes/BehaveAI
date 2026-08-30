@@ -39,8 +39,6 @@ of the project INI. All other tracker settings live in that same section
 (det_thresh, det_conf_floor, max_age, min_hits, iou_threshold, ...) and
 are read by load_configs.read_tracker_params() into params["tracker"].
 
-Two backends, selected by the `tracker_type` config key:
-
     "builtin"  -> KalmanTracker below. No torch dependency, so this is the
                   one to use on the NCNN / Raspberry Pi path.
     anything   -> BoxMOTTracker (ocsort, bytetrack, botsort, deepocsort...).
@@ -403,8 +401,8 @@ def maybe_retrain(
                 name="train",
                 exist_ok=True,
                 # --- Core Training ---
-                batch=16,  # Set as high as your GPU allows (16, 32, 64)
-                device=0,  # GPU ID (0 for first GPU, or 'cpu' for CPU)
+                batch=params["train_batch"],
+                device=params["train_device"],
                 # --- Optimizer & Learning Rate ---
                 optimizer="AdamW",
                 lr0=0.001,
@@ -463,8 +461,8 @@ def maybe_retrain(
             name="train",
             exist_ok=True,
             # --- Core Training ---
-            batch=16,
-            device=0,
+            batch=params["train_batch"],
+            device=params["train_device"],
             # --- Optimizer & Learning Rate ---
             optimizer="AdamW",
             lr0=0.001,
@@ -570,7 +568,7 @@ def train_models():
                         weights_path,
                         params["secondary_classifier"],
                         params["secondary_epochs"],
-                        224,
+                        params["secondary_imgsz"],
                     )
 
                     # Load only if weights actually exist. maybe_retrain can
@@ -648,7 +646,7 @@ def train_models():
                     weights_path,
                     params["secondary_classifier"],
                     params["secondary_epochs"],
-                    224,
+                    params["secondary_imgsz"],
                 )
 
                 if os.path.isfile(weights_path):
@@ -677,10 +675,10 @@ def train_models():
     # the secondary annotations share source frames with primary annotations.
 
     # check if external static model is specified, else train
-    if (
-        params["primary_static_external_model"] == ""
-        or params["primary_static_pseudo_labeling"] == "False" == "True"
-    ):
+    # params['use_local_static_model'] is computed once in load_configs and
+    # consumed here AND in process_video(), so the two can no longer
+    # disagree about whether the local weights are supposed to exist.
+    if params["use_local_static_model"]:
         print("Training primary static model")
         if params["primary_static_classes"][0] != "0":
             maybe_retrain(
@@ -690,7 +688,7 @@ def train_models():
                 params["primary_static_model_path"],
                 params["primary_classifier"],
                 params["primary_epochs"],
-                640,
+                params["primary_imgsz"],
             )
 
     if params["primary_motion_classes"][0] != "0":
@@ -701,7 +699,7 @@ def train_models():
             params["primary_motion_model_path"],
             params["primary_classifier"],
             params["primary_epochs"],
-            640,
+            params["primary_imgsz"],
         )
 
 
@@ -1187,9 +1185,11 @@ def build_tracker(fps):
     return KalmanTracker(
         dist_thresh=params["match_distance_thresh"],
         max_missed=params["delete_after_missed"],
-        min_hits=params.get("min_hits", 3),
-        iou_weight=params.get("tracker_iou_weight", 0.4),
-        class_penalty=params.get("tracker_class_penalty", 2.0),
+        # min_hits lives in the [tracker] block alongside the BoxMOT
+        # settings, so both backends honour the same value.
+        min_hits=params["tracker"]["min_hits"],
+        iou_weight=params["tracker_iou_weight"],
+        class_penalty=params["tracker_class_penalty"],
     )
 
 
@@ -1231,10 +1231,7 @@ def process_video(file):
     model_motion = None
 
     # Primary STATIC
-    if params["primary_static_classes"][0] != "0" and (
-        params["primary_static_external_model"] == ""
-        or params["primary_static_pseudo_labeling"] == "False"
-    ):
+    if params["primary_static_classes"][0] != "0" and params["use_local_static_model"]:
         weights = params["primary_static_model_path"]  # already ends in best.pt
     else:
         weights = params["primary_static_external_model"]
@@ -1397,7 +1394,10 @@ def process_video(file):
                 # from. Anything that fails to join a track is never
                 # confirmed and never reaches the CSV.
                 results_static = model_static.predict(
-                    frame, conf=params["detector_conf_thresh"], verbose=False
+                    frame,
+                    conf=params["detector_conf_thresh"],
+                    imgsz=params["inference_imgsz"],
+                    verbose=False,
                 )
                 for box in results_static[0].boxes:
                     coords = tuple(map(int, box.xyxy[0].tolist()))
@@ -1420,6 +1420,7 @@ def process_video(file):
                 results_motion = model_motion.predict(
                     motion_image,
                     conf=params["detector_conf_thresh"],
+                    imgsz=params["inference_imgsz"],
                     verbose=False,
                 )
                 for box in results_motion[0].boxes:
@@ -1563,11 +1564,20 @@ def process_video(file):
                             m = model_dict.get(primary_class)
                         if m is None:
                             return None, None
-                        res = m.predict(crop, verbose=False)
+                        res = m.predict(
+                            crop,
+                            imgsz=params["secondary_imgsz"],
+                            verbose=False,
+                        )
                         if res[0].probs is None:
                             return None, None
-                        idx = res[0].probs.top1
-                        return m.names[idx], res[0].probs.top1conf.item()
+                        conf = res[0].probs.top1conf.item()
+                        # Below the threshold the top-1 label is noise. Returning it
+                        # anyway is how a single track ends up cycling through four
+                        # species across four consecutive frames.
+                        if conf < params["secondary_conf_thresh"]:
+                            return None, None
+                        return m.names[res[0].probs.top1], conf
 
                     # Static secondary — only if configured
                     if len(params["secondary_static_classes"]) >= 2:
@@ -1586,7 +1596,7 @@ def process_video(file):
                         cls = best_prediction.name
                         conf = best_prediction.accuracy
 
-                        if cls is not None:
+                        if cls is not None and conf >= params["secondary_conf_thresh"]:
                             det["secondary_static_class"] = cls
                             det["secondary_static_conf"] = conf
 
