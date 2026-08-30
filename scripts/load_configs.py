@@ -4,6 +4,95 @@ import sys
 import tkinter as tk
 from tkinter import filedialog
 
+# ---------- Tracker configuration ----------------------------------------
+
+# Every knob the BoxMOT adapter accepts, with the default used when the key is
+# absent from the INI. Keys live in a [tracker] section; the older [kalman]
+# section is still read as a fallback so existing project files keep working.
+#
+#   name -> (default, type)
+TRACKER_DEFAULTS = {
+    # Backend. "builtin" uses the bundled KalmanTracker (no torch dependency).
+    "tracker_type": ("ocsort", str),
+    # Confidence YOLO itself is run at. Must be BELOW det_thresh, otherwise the
+    # tracker's low-score recovery pass has nothing to recover: the detector
+    # will already have thrown those boxes away.
+    "det_conf_floor": (0.05, float),
+    # The tracker's high/low confidence split.
+    "det_thresh": (0.25, float),
+    # Processed frames a track survives unmatched.
+    "max_age": (45, int),
+    # Detections required before a track is written to the CSV.
+    "min_hits": (3, int),
+    # Association IoU gate.
+    "iou_threshold": (0.20, float),
+    # Separate track pools per primary class.
+    "per_class": (False, bool),
+    "device": ("cpu", str),
+    "half": (False, bool),
+    # Only loaded by the ReID trackers.
+    "reid_weights": ("osnet_x0_25_msmt17.pt", str),
+    # Centroid history length used to derive vx/vy.
+    "velocity_window": (5, int),
+    # Abort rather than continue when the chosen backend silently ignores a
+    # critical setting above.
+    "strict_kwargs": (True, bool),
+    "verbose": (True, bool),
+}
+
+# Backends that support a second, low-confidence association pass. For anything
+# else, det_conf_floor is meaningless and the detector runs at
+# primary_conf_thresh instead.
+TWO_STAGE_TRACKERS = {
+    "bytetrack",
+    "botsort",
+    "ocsort",
+    "deepocsort",
+    "hybridsort",
+    "boosttrack",
+    "occluboost",
+    "strongsort",
+    "sfsort",
+}
+
+
+def _cfg_bool(value, fallback=False):
+    """INI booleans, tolerant of the true/yes/1/on family."""
+    if value is None:
+        return fallback
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def read_tracker_params(config):
+    """
+    Read the [tracker] section into a plain dict, falling back to [kalman] for
+    keys that used to live there, then to TRACKER_DEFAULTS.
+    """
+    section = config["tracker"] if config.has_section("tracker") else {}
+    legacy = config["kalman"] if config.has_section("kalman") else {}
+
+    out = {}
+    for key, (default, kind) in TRACKER_DEFAULTS.items():
+        raw = section.get(key, legacy.get(key, None))
+        if raw is None or str(raw).strip() == "":
+            out[key] = default
+            continue
+        try:
+            if kind is bool:
+                out[key] = _cfg_bool(raw, default)
+            else:
+                out[key] = kind(str(raw).strip())
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"[tracker] {key}: could not read '{raw}' as {kind.__name__}"
+            )
+
+    out["tracker_type"] = out["tracker_type"].strip().lower()
+    return out
+
+
 # ---------- Project-aware configuration loading --------------------------
 
 
@@ -296,14 +385,12 @@ def read_parameters():
             "primary_classifier", "yolo11s.pt"
         )
         params["primary_epochs"] = int(config["DEFAULT"].get("primary_epochs", "50"))
-        params["primary_imgsz"] = int(config["DEFAULT"].get("primary_imgsz", "640"))
         params["secondary_classifier"] = config["DEFAULT"].get(
             "secondary_classifier", "yolo11s-cls.pt"
         )
         params["secondary_epochs"] = int(
             config["DEFAULT"].get("secondary_epochs", "50")
         )
-        params["secondary_imgsz"] = int(config["DEFAULT"].get("secondary_imgsz", "224"))
 
         if params["hierarchical_mode"]:
             params["secondary_static_project_path"] = (
@@ -400,7 +487,24 @@ def read_parameters():
         params["motion_threshold"] = -1 * int(
             config["DEFAULT"].get("motion_threshold", "0")
         )
-        params["tracker_type"] = config["kalman"].get("tracker_type", "ocsort")
+
+        # ---- tracker block --------------------------------------------
+        params["tracker"] = read_tracker_params(config)
+        # Kept at the top level for backwards compatibility with any code that
+        # still reads params["tracker_type"] directly.
+        params["tracker_type"] = params["tracker"]["tracker_type"]
+
+        # Confidence the DETECTOR is actually run at. For a two-stage tracker
+        # this is deliberately below the tracker's det_thresh so the low-score
+        # association pass has candidates; otherwise there is no consumer for
+        # the extra boxes and we stay at primary_conf_thresh.
+        if params["tracker_type"] in TWO_STAGE_TRACKERS:
+            params["detector_conf_thresh"] = min(
+                params["tracker"]["det_conf_floor"],
+                params["primary_conf_thresh"],
+            )
+        else:
+            params["detector_conf_thresh"] = params["primary_conf_thresh"]
 
     except KeyError as e:
         raise KeyError(f"Missing configuration parameter: {e}")
@@ -467,6 +571,40 @@ def validate_configuration(params):
         raise ValueError("static_blocks_motion must be 'true' or 'false'")
     if params["save_empty_frames"] not in ("true", "false"):
         raise ValueError("save_empty_frames must be 'true' or 'false'")
+
+    # ---- tracker block ------------------------------------------------
+    tp = params["tracker"]
+    known = set(TWO_STAGE_TRACKERS) | {"builtin"}
+    if tp["tracker_type"] not in known:
+        raise ValueError(
+            f"[tracker] tracker_type '{tp['tracker_type']}' is not recognised. "
+            f"Choose one of: {', '.join(sorted(known))}"
+        )
+    if not 0.0 < tp["det_thresh"] < 1.0:
+        raise ValueError("[tracker] det_thresh must be between 0 and 1")
+    if not 0.0 < tp["det_conf_floor"] < 1.0:
+        raise ValueError("[tracker] det_conf_floor must be between 0 and 1")
+    if tp["max_age"] < 1:
+        raise ValueError("[tracker] max_age must be at least 1")
+    if tp["min_hits"] < 1:
+        raise ValueError("[tracker] min_hits must be at least 1")
+    if not 0.0 <= tp["iou_threshold"] < 1.0:
+        raise ValueError("[tracker] iou_threshold must be in [0, 1)")
+
+    # The trap this whole block exists to prevent: if the detector filters at
+    # or above the tracker's split, the low-score bin is permanently empty and
+    # the second association pass never runs.
+    if (
+        tp["tracker_type"] in TWO_STAGE_TRACKERS
+        and params["detector_conf_thresh"] >= tp["det_thresh"]
+    ):
+        print(
+            f"Warning: detector confidence ({params['detector_conf_thresh']}) is "
+            f"not below the tracker's det_thresh ({tp['det_thresh']}), so "
+            f"{tp['tracker_type']}'s low-confidence recovery pass will never "
+            f"fire. Lower det_conf_floor (and primary_conf_thresh) in your INI."
+        )
+
     return True
 
 

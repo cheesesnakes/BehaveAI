@@ -34,6 +34,11 @@ requiring the full stack.
 
 Tracking
 --------
+Two backends, selected by the `tracker_type` key in the [tracker] section
+of the project INI. All other tracker settings live in that same section
+(det_thresh, det_conf_floor, max_age, min_hits, iou_threshold, ...) and
+are read by load_configs.read_tracker_params() into params["tracker"].
+
 Two backends, selected by the `tracker_type` config key:
 
     "builtin"  -> KalmanTracker below. No torch dependency, so this is the
@@ -410,7 +415,6 @@ def maybe_retrain(
                 scale=0.0,  # protects motion-colour gradients
                 translate=0.0,  # preserves motion cues
                 fliplr=0.5,
-                patience=10,
                 # --- Loss Weights ---
                 box=7.5,
                 cls=0.5,
@@ -471,7 +475,6 @@ def maybe_retrain(
             scale=0.0,
             translate=0.0,
             fliplr=0.5,
-            patience=10,
             # --- Loss Weights ---
             box=7.5,
             cls=0.5,
@@ -567,7 +570,7 @@ def train_models():
                         weights_path,
                         params["secondary_classifier"],
                         params["secondary_epochs"],
-                        params["secondary_imgsz"],
+                        224,
                     )
 
                     # Load only if weights actually exist. maybe_retrain can
@@ -645,7 +648,7 @@ def train_models():
                     weights_path,
                     params["secondary_classifier"],
                     params["secondary_epochs"],
-                    params["secondary_imgsz"],
+                    224,
                 )
 
                 if os.path.isfile(weights_path):
@@ -676,7 +679,7 @@ def train_models():
     # check if external static model is specified, else train
     if (
         params["primary_static_external_model"] == ""
-        or params["primary_static_pseudo_labeling"] == "True"
+        or params["primary_static_pseudo_labeling"] == "False" == "True"
     ):
         print("Training primary static model")
         if params["primary_static_classes"][0] != "0":
@@ -687,7 +690,7 @@ def train_models():
                 params["primary_static_model_path"],
                 params["primary_classifier"],
                 params["primary_epochs"],
-                params["primary_imgsz"],
+                640,
             )
 
     if params["primary_motion_classes"][0] != "0":
@@ -698,7 +701,7 @@ def train_models():
             params["primary_motion_model_path"],
             params["primary_classifier"],
             params["primary_epochs"],
-            params["primary_imgsz"],
+            640,
         )
 
 
@@ -1168,16 +1171,12 @@ def build_tracker(fps):
 
     if tracker_type != "builtin" and BoxMOTTracker is not None:
         print(f"Using {tracker_type} tracker.")
-        return BoxMOTTracker(
-            tracker_type=tracker_type,
-            class_names=params["primary_classes"],
-            frame_rate=eff_fps,
-            det_thresh=params["primary_conf_thresh"],
-            max_age=params["delete_after_missed"],
-            min_hits=params.get("min_hits", 3),
-            iou_threshold=params.get("tracker_iou_thresh", 0.20),
-            device=params.get("tracker_device", "cpu"),
-        )
+        # Every knob comes from the [tracker] INI section via
+        # params["tracker"]. Note that max_age is NOT delete_after_missed
+        # any more: that key belongs to the builtin tracker and was far too
+        # short for BoxMOT once the frame_rate/30 buffer scaling was
+        # applied on top of it.
+        return BoxMOTTracker.from_params(params, frame_rate=eff_fps)
 
     if tracker_type != "builtin" and BoxMOTTracker is None:
         print(
@@ -1234,7 +1233,7 @@ def process_video(file):
     # Primary STATIC
     if params["primary_static_classes"][0] != "0" and (
         params["primary_static_external_model"] == ""
-        or params["primary_static_pseudo_labeling"] == "True"
+        or params["primary_static_pseudo_labeling"] == "False"
     ):
         weights = params["primary_static_model_path"]  # already ends in best.pt
     else:
@@ -1392,8 +1391,13 @@ def process_video(file):
 
             # Primary STATIC detection
             if model_static is not None:
+                # Run at detector_conf_thresh, NOT primary_conf_thresh. For a
+                # two-stage tracker these differ: the extra low-confidence
+                # boxes are what the second association pass recovers tracks
+                # from. Anything that fails to join a track is never
+                # confirmed and never reaches the CSV.
                 results_static = model_static.predict(
-                    frame, conf=params["primary_conf_thresh"], verbose=False
+                    frame, conf=params["detector_conf_thresh"], verbose=False
                 )
                 for box in results_static[0].boxes:
                     coords = tuple(map(int, box.xyxy[0].tolist()))
@@ -1414,7 +1418,9 @@ def process_video(file):
             # Primary MOTION detection
             if model_motion is not None and motion_image is not None:
                 results_motion = model_motion.predict(
-                    motion_image, conf=params["primary_conf_thresh"], verbose=False
+                    motion_image,
+                    conf=params["detector_conf_thresh"],
+                    verbose=False,
                 )
                 for box in results_motion[0].boxes:
                     coords = tuple(map(int, box.xyxy[0].tolist()))
@@ -1530,7 +1536,16 @@ def process_video(file):
                     det["primary_static_class"] = primary_class_combined
                     det["primary_static_conf"] = primary_conf_combined
 
-                if params["hierarchical_mode"]:
+                # Lowering the detector floor multiplies the number of crops
+                # reaching this stage, and the secondary classifier is the
+                # most expensive part of the loop. Only classify detections
+                # that clear primary_conf_thresh; the rest exist purely to
+                # feed the tracker's recovery pass. If one is later promoted
+                # into a track its secondary columns stay blank, which is
+                # honest — we never actually classified it.
+                if params["hierarchical_mode"] and (
+                    primary_conf >= params["primary_conf_thresh"]
+                ):
                     x1, y1, x2, y2 = coords
                     # Uses the motion image built once in 3b — does NOT rebuild
                     # it (that was the frame-history corruption bug).

@@ -76,6 +76,25 @@ TRACKER_ALIASES = {
     "sfsort": ("SFSORT", "SFSort"),
 }
 
+# ---------------------------------------------------------------------------
+# Constructor kwarg groups
+# ---------------------------------------------------------------------------
+# BoxMOT constructors differ per tracker AND per version, so the adapter offers
+# every spelling it knows for a given knob and lets _filter_kwargs() keep the
+# ones that fit. The danger is silence: if NO spelling in a group is accepted,
+# the knob you set in the INI does nothing at all and the run looks fine.
+#
+# These groups let __init__ report exactly which knobs failed to land, and
+# (for `strict_kwargs`) refuse to start when a critical one is missing.
+#
+#   name -> (candidate kwarg names, critical?)
+KWARG_GROUPS = {
+    "detection threshold": (("det_thresh", "min_conf", "track_thresh"), True),
+    "track lifetime": (("max_age", "track_buffer"), True),
+    "association gate": (("iou_threshold", "match_thresh"), False),
+    "track confirmation": (("min_hits",), False),
+}
+
 # Trackers that need ReID weights to construct.
 REID_TRACKERS = {
     "botsort",
@@ -195,6 +214,7 @@ class BoxMOTTracker:
         reid_weights="osnet_x0_25_msmt17.pt",
         velocity_window=5,
         verbose=True,
+        strict_kwargs=False,
         _tracker_override=None,
     ):
         """
@@ -207,14 +227,37 @@ class BoxMOTTracker:
         frame_rate   : frames per second AS SEEN BY THE TRACKER. If you process
                        every Nth frame, pass fps / N — otherwise ByteTrack-style
                        buffers are wrong by a factor of N.
+        det_thresh   : the tracker's OWN high/low confidence split, not the
+                       detector's. Detections below this are not discarded —
+                       they are held back for the second association pass
+                       against tracks that found no high-confidence partner.
+                       This only works if your detector was run at a LOWER
+                       confidence than this value; if YOLO already filtered at
+                       det_thresh then the low-score bin is always empty and
+                       the recovery pass never fires. See `det_conf_floor` in
+                       the INI.
         max_age      : frames a track survives unmatched. In PROCESSED frames.
                        This is your "brief disappearance" knob. At 30 fps with
                        frame_skip=0, 45 ~= 1.5 s of occlusion.
+
+                       IMPORTANT: ByteTrack-lineage trackers size their buffer
+                       as int(frame_rate / 30.0 * track_buffer). Passing a low
+                       effective fps therefore SHRINKS max_age silently — at
+                       5 fps a max_age of 5 becomes int(0.83) == 0 and every
+                       track dies on its first missed frame. This adapter
+                       pre-scales `track_buffer` so the effective lifetime is
+                       the max_age you asked for, whatever the frame rate.
         min_hits     : detections required before a track is reported. Stops a
                        single flickering false positive from becoming a
-                       permanent individual in your CSV.
+                       permanent individual in your CSV. Most BoxMOT trackers
+                       do NOT accept this kwarg; when it is not accepted the
+                       adapter enforces it itself, so the knob always works.
         iou_threshold: association gate. Fish are small and fast, so this wants
                        to be looser than the pedestrian default of 0.3.
+        strict_kwargs: raise instead of warning when a CRITICAL knob (see
+                       KWARG_GROUPS) is not accepted by the chosen tracker.
+                       Recommended: silently ignored settings are very hard to
+                       spot in the output.
         per_class    : keep separate track pools per class. Leave False unless
                        your primary classes are genuinely different animals
                        that never get confused for one another.
@@ -230,19 +273,30 @@ class BoxMOTTracker:
         self._name_to_idx = {n: i for i, n in enumerate(self.class_names)}
 
         # ---- construct the underlying tracker --------------------------
+        self.min_hits = max(1, int(min_hits))
+        self.unsupported = []
+        self._emulate_min_hits = False
+
         if _tracker_override is not None:
             self._key = tracker_type.lower()
             self._tracker = _tracker_override
         else:
             self._key, cls = _resolve_tracker_class(tracker_type)
 
+            # Compensate for the frame_rate/30 buffer scaling described in the
+            # docstring, so `track_buffer` and `max_age` mean the same thing.
+            if frame_rate and frame_rate > 0:
+                track_buffer = max(1, int(round(max_age * 30.0 / float(frame_rate))))
+            else:
+                track_buffer = int(max_age)
+
             candidates = {
                 "det_thresh": det_thresh,
                 "min_conf": det_thresh,
                 "track_thresh": det_thresh,
-                "max_age": max_age,
-                "track_buffer": max_age,
-                "min_hits": min_hits,
+                "max_age": int(max_age),
+                "track_buffer": track_buffer,
+                "min_hits": int(min_hits),
                 "iou_threshold": iou_threshold,
                 "match_thresh": 1.0 - iou_threshold,
                 "frame_rate": frame_rate,
@@ -259,13 +313,49 @@ class BoxMOTTracker:
             accepted, dropped = _filter_kwargs(cls, candidates)
             self._tracker = cls(**accepted)
 
+            # Which configured knobs actually landed?
+            self.unsupported = [
+                label
+                for label, (names, _crit) in KWARG_GROUPS.items()
+                if not any(n in accepted for n in names)
+            ]
+            critical = [label for label in self.unsupported if KWARG_GROUPS[label][1]]
+
             if self.verbose:
                 print(f"[tracker] {cls.__name__} ({', '.join(sorted(accepted))})")
+                if track_buffer != int(max_age) and "track_buffer" in accepted:
+                    print(
+                        f"[tracker] max_age={int(max_age)} processed frames "
+                        f"-> track_buffer={track_buffer} "
+                        f"(compensating for frame_rate={frame_rate:.2f})"
+                    )
                 if dropped:
                     print(
                         f"[tracker] not accepted by this version, ignored: "
                         f"{', '.join(sorted(dropped))}"
                     )
+                for label in self.unsupported:
+                    tried = ", ".join(KWARG_GROUPS[label][0])
+                    tag = "CRITICAL" if KWARG_GROUPS[label][1] else "note"
+                    print(
+                        f"[tracker] {tag}: '{label}' is not configurable on "
+                        f"{cls.__name__} (tried: {tried}). Your INI setting "
+                        f"has no effect."
+                    )
+
+            if critical and strict_kwargs:
+                raise RuntimeError(
+                    f"{cls.__name__} ignores these settings: "
+                    f"{', '.join(critical)}. They are set in your INI but will "
+                    f"do nothing, which usually shows up later as unexplained "
+                    f"track fragmentation. Either choose a different "
+                    f"tracker_type or set strict_kwargs = false in [tracker] "
+                    f"to proceed anyway."
+                )
+
+            # If the tracker won't take min_hits, enforce it here so the knob
+            # behaves identically across backends.
+            self._emulate_min_hits = "min_hits" not in accepted
 
         # ---- bookkeeping the pipeline reads ---------------------------
         # tid -> {'box', 'centroid', 'cls_name', 'conf', 'last_frame', 'hits'}
@@ -273,6 +363,36 @@ class BoxMOTTracker:
         self._history = {}  # tid -> deque[(frame_idx, cx, cy)]
         self._frame_idx = 0
         self.max_age = max_age
+
+    # -- construction from the INI ---------------------------------------
+
+    @classmethod
+    def from_params(cls, params, frame_rate, class_names=None):
+        """
+        Build from the `params["tracker"]` block produced by load_configs.py.
+
+        `frame_rate` must be the rate the TRACKER sees, i.e.
+        fps / (frame_skip + 1), not the video's native fps.
+        """
+        tp = params.get("tracker", {})
+        return cls(
+            tracker_type=tp.get("tracker_type", "ocsort"),
+            class_names=(
+                class_names if class_names is not None else params["primary_classes"]
+            ),
+            frame_rate=frame_rate,
+            det_thresh=tp.get("det_thresh", 0.25),
+            max_age=tp.get("max_age", 45),
+            min_hits=tp.get("min_hits", 3),
+            iou_threshold=tp.get("iou_threshold", 0.20),
+            per_class=tp.get("per_class", False),
+            device=tp.get("device", "cpu"),
+            half=tp.get("half", False),
+            reid_weights=tp.get("reid_weights", "osnet_x0_25_msmt17.pt"),
+            velocity_window=tp.get("velocity_window", 5),
+            strict_kwargs=tp.get("strict_kwargs", True),
+            verbose=tp.get("verbose", True),
+        )
 
     # -- class id helpers ------------------------------------------------
 
@@ -353,17 +473,26 @@ class BoxMOTTracker:
             cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
             alive.add(tid)
 
-            if 0 <= det_ind < len(orig_index):
+            prev = self.tracks.get(tid, {})
+            hits = prev.get("hits", 0) + 1
+
+            # Report the track only once it is confirmed. When the underlying
+            # tracker accepts min_hits it has already done this and the guard
+            # is a no-op; when it does not, this is what stops one flickering
+            # false positive from becoming a permanent row in the CSV.
+            confirmed = (not self._emulate_min_hits) or hits >= self.min_hits
+
+            if confirmed and 0 <= det_ind < len(orig_index):
                 assignment[orig_index[det_ind]] = tid
 
-            prev = self.tracks.get(tid, {})
             self.tracks[tid] = {
                 "box": (int(x1), int(y1), int(x2), int(y2)),
                 "centroid": (cx, cy),
                 "cls_name": self._cls_name(cls_i),
                 "conf": conf,
                 "last_frame": self._frame_idx,
-                "hits": prev.get("hits", 0) + 1,
+                "hits": hits,
+                "confirmed": confirmed,
             }
 
             hist = self._history.setdefault(tid, deque(maxlen=self.velocity_window))
