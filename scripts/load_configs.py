@@ -296,12 +296,14 @@ def read_parameters():
             "primary_classifier", "yolo11s.pt"
         )
         params["primary_epochs"] = int(config["DEFAULT"].get("primary_epochs", "50"))
+        params["primary_imgsz"] = int(config["DEFAULT"].get("primary_imgsz", "640"))
         params["secondary_classifier"] = config["DEFAULT"].get(
             "secondary_classifier", "yolo11s-cls.pt"
         )
         params["secondary_epochs"] = int(
             config["DEFAULT"].get("secondary_epochs", "50")
         )
+        params["secondary_imgsz"] = int(config["DEFAULT"].get("secondary_imgsz", "224"))
 
         if params["hierarchical_mode"]:
             params["secondary_static_project_path"] = (

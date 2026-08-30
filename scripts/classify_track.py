@@ -565,7 +565,7 @@ def train_models():
                         weights_path,
                         params["secondary_classifier"],
                         params["secondary_epochs"],
-                        224,
+                        params["secondary_imgsz"],
                     )
 
                     # Load only if weights actually exist. maybe_retrain can
@@ -643,7 +643,7 @@ def train_models():
                     weights_path,
                     params["secondary_classifier"],
                     params["secondary_epochs"],
-                    224,
+                    params["secondary_imgsz"],
                 )
 
                 if os.path.isfile(weights_path):
@@ -685,7 +685,7 @@ def train_models():
                 params["primary_static_model_path"],
                 params["primary_classifier"],
                 params["primary_epochs"],
-                640,
+                params["primary_imgsz"],
             )
 
     if params["primary_motion_classes"][0] != "0":
@@ -696,7 +696,7 @@ def train_models():
             params["primary_motion_model_path"],
             params["primary_classifier"],
             params["primary_epochs"],
-            640,
+            params["primary_imgsz"],
         )
 
 
