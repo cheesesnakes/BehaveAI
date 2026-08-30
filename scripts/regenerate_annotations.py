@@ -101,9 +101,8 @@ def resolve_project_path(project_dir, value, fallback):
 def load_config(config_path):
     """
     Read configuration from config_path and return (params_dict, clips_dir_resolved).
-    params contains numeric / strategy settings used by the image generation pipeline.
-    clips_dir_resolved is an absolute (or normalized) path to the clips directory resolved
-    relative to the INI's project directory.
+    params contains numeric / strategy settings used by the image generation pipeline,
+    and also the crop base directories for secondary classifiers.
     """
     config = configparser.ConfigParser()
     config.optionxform = str  # preserve case
@@ -139,6 +138,19 @@ def load_config(config_path):
         params["save_empty_frames"] = (
             config["DEFAULT"].get("save_empty_frames", "false").lower()
         )
+
+        # --- Read crop base directories (new) ---
+        params["static_cropped_base_dir"] = resolve_project_path(
+            project_dir,
+            config["DEFAULT"].get("static_cropped_base_dir", ""),
+            "annotations/annot_static_crop",
+        )
+        params["motion_cropped_base_dir"] = resolve_project_path(
+            project_dir,
+            config["DEFAULT"].get("motion_cropped_base_dir", ""),
+            "annotations/annot_motion_crop",
+        )
+        # ---------------------------------------------------------------
 
         # Compute base frame window size (number of sampled frames)
         base_window = 4
@@ -469,10 +481,6 @@ def regenerate_crops_for_frame(
 ):
     """
     Re-cut every indexed crop for one frame from a freshly generated image.
-
-    final_img must be the fully processed frame — grey boxes and any blocking
-    boxes already applied — so the crops match what the annotator originally
-    saw. Returns (regenerated, [(stale_path, reason), ...]).
     """
     entries = crop_index.get((video_name, frame_num), [])
     if not entries or final_img is None:
@@ -530,8 +538,14 @@ def regenerate_annotations(config_path):
     project_dir = os.path.dirname(os.path.abspath(config_path))
     os.chdir(project_dir)
 
+    # Extract crop base directories from params (now available)
+    static_crop_base = params["static_cropped_base_dir"]
+    motion_crop_base = params["motion_cropped_base_dir"]
+
     print(f"Regenerating using INI: {config_path}")
     print(f"Using clips directory: {clips_dir}")
+    print(f"Static crop base: {static_crop_base}")
+    print(f"Motion crop base: {motion_crop_base}")
     if not QUARANTINE_STALE:
         print("Quarantine disabled — stale files will be reported, not moved.")
 
@@ -555,11 +569,9 @@ def regenerate_annotations(config_path):
 
     print(f"Found {len(base_names)} annotated frames to process (motion + static).")
 
-    # Index existing secondary-classifier crops once. The directory path holds
-    # the primary/secondary class assignment, so crops are always overwritten
-    # in place rather than rewritten from scratch.
-    static_crop_index = index_crops(os.path.join(ANNOT_ROOT, "annot_static_crop"))
-    motion_crop_index = index_crops(os.path.join(ANNOT_ROOT, "annot_motion_crop"))
+    # Index existing secondary-classifier crops using the config‑provided base dirs
+    static_crop_index = index_crops(static_crop_base)
+    motion_crop_index = index_crops(motion_crop_base)
     n_static_crops = sum(len(v) for v in static_crop_index.values())
     n_motion_crops = sum(len(v) for v in motion_crop_index.values())
     print(f"Indexed {n_static_crops} static and {n_motion_crops} motion crops.")
@@ -599,8 +611,6 @@ def regenerate_annotations(config_path):
             print(
                 f"Video not found for {base_name}: looking in {clips_dir} for files named {video_name}.*"
             )
-            # An image left from a previous run would now be paired with the
-            # current label file — stale pixels, current boxes.
             quarantine(static_img_path, "source video not found", stats)
             quarantine(motion_img_path, "source video not found", stats)
             continue
@@ -634,16 +644,10 @@ def regenerate_annotations(config_path):
             ANNOT_ROOT, "annot_motion", "labels", split, f"{base_name}.txt"
         )
 
-        # -----------------------
-        # Build both processed frames
-        # -----------------------
-        # Both are built unconditionally: a frame indexed under annot_motion can
-        # still own static crops, and vice versa. Only the full-frame writes
-        # below are gated by base_dir.
+        # Build both processed frames (same as before)
         static_final = None
         if static_img is not None:
             static_final = apply_grey_boxes(static_img, static_mask_boxes)
-            # If motion_blocks_static enabled, block regions where motion labels exist
             if params.get("motion_blocks_static", "false") == "true":
                 static_block_boxes = get_blocking_boxes(motion_label_path, img_w, img_h)
                 static_final = apply_blocking_boxes(static_final, static_block_boxes)
@@ -651,14 +655,11 @@ def regenerate_annotations(config_path):
         motion_final = None
         if motion_img is not None:
             motion_final = apply_grey_boxes(motion_img, motion_mask_boxes)
-            # Apply static blocking if enabled (static annotations can block motion image)
             if params.get("static_blocks_motion", "false") == "true":
                 static_boxes = get_blocking_boxes(static_label_path, img_w, img_h)
                 motion_final = apply_blocking_boxes(motion_final, static_boxes)
 
-        # -----------------------
         # Write full frames
-        # -----------------------
         if base_dir == "annot_static" or params["save_empty_frames"] == "true":
             if static_final is None:
                 print(f"  No static image for {base_name}")
@@ -677,16 +678,14 @@ def regenerate_annotations(config_path):
                 cv2.imwrite(motion_img_path, motion_final)
                 print(f"Regenerated motion: {motion_img_path}")
 
-        # -----------------------
         # Re-cut secondary-classifier crops from the same processed frames
-        # -----------------------
         key = (video_name, frame_num)
         for stream, final_img, lbl, idx, seen in (
             ("static", static_final, static_label_path, static_crop_index, static_seen),
             ("motion", motion_final, motion_label_path, motion_crop_index, motion_seen),
         ):
             if final_img is None:
-                continue  # left unseen, so its crops are swept below
+                continue
             seen.add(key)
             r, stale = regenerate_crops_for_frame(
                 video_name, frame_num, final_img, lbl, idx, img_w, img_h, stream
@@ -697,9 +696,7 @@ def regenerate_annotations(config_path):
 
     print("Regeneration loop complete.")
 
-    # -----------------------
     # Sweep 1: crops whose source frame was never processed
-    # -----------------------
     for idx, seen, name in (
         (static_crop_index, static_seen, "static"),
         (motion_crop_index, motion_seen, "motion"),
@@ -714,9 +711,7 @@ def regenerate_annotations(config_path):
                     stats,
                 )
 
-    # -----------------------
-    # Sweep 2: images with no surviving label file
-    # -----------------------
+    # Sweep 2: images with no surviving label file (unchanged)
     for base_dir in ("annot_static", "annot_motion"):
         for split in ("train", "val"):
             img_dir = os.path.join(ANNOT_ROOT, base_dir, "images", split)

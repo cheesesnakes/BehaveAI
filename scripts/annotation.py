@@ -113,6 +113,17 @@ rgb_multipliers = params.get("rgb_multipliers", [1.0, 1.0, 1.0])
 motion_threshold = params.get("motion_threshold", 0)
 chromatic_tail_only = params.get("chromatic_tail_only", "false")
 
+# ----------------------------------------------------------------------------
+# Validate crop base directories exist; create if missing (annotator will write crops)
+# ----------------------------------------------------------------------------
+for base_dir in (static_cropped_base_dir, motion_cropped_base_dir):
+    if base_dir:
+        os.makedirs(base_dir, exist_ok=True)
+    else:
+        print(
+            f"Warning: crop base directory not set; hierarchical crops will not be saved."
+        )
+# ----------------------------------------------------------------------------
 
 primary_classes_info = list(zip(primary_hotkeys, primary_classes))
 secondary_classes_info = list(zip(secondary_hotkeys, secondary_classes))

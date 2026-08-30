@@ -502,22 +502,17 @@ def maybe_retrain(
 
 def train_models():
     """
-    Walk the configured model hierarchy and ensure each has weights on disk
-    (or leave it absent if there isn't enough annotation data). Populates two
-    global dicts used later at inference time:
-
-        secondary_static_models[primary_class] = YOLO instance
-        secondary_motion_models[primary_class] = YOLO instance
-
-    Keys are only set for classes whose secondary model was successfully
-    trained AND loaded. Missing keys are handled naturally by `.get(..., None)`
-    at inference time.
+    Walk the configured model hierarchy and ensure each has weights on disk.
+    This function now validates that secondary crop directories exist before
+    attempting to train classifiers; if a directory is missing, the entire
+    secondary model for that primary class is skipped.
     """
     global secondary_static_models, secondary_motion_models
     global static_class_map, motion_class_map
 
     secondary_static_models = None
     secondary_motion_models = None
+
     # ---- hierarchical (secondary) models ------------------------------
     if params["hierarchical_mode"]:
         # train if no external model is specified
@@ -529,35 +524,127 @@ def train_models():
                 for _ in range(len(params["primary_classes"]))
             ]
             if len(params["secondary_static_classes"]) >= 2:
+                # Check that the base crop directory exists before attempting any static secondary training
+                static_data_root = params.get("secondary_static_data_path", "")
+                if not static_data_root or not os.path.isdir(static_data_root):
+                    print(
+                        f"Warning: secondary_static_data_path '{static_data_root}' does not exist; "
+                        "skipping all static secondary models."
+                    )
+                else:
+                    for primary_class in params["primary_classes"]:
+                        idx = params["primary_classes"].index(primary_class)
+                        hotkey = params["primary_hotkeys"][idx]
+
+                        if hotkey in params["secondary_hotkeys"]:
+                            continue
+                        if primary_class in params["ignore_secondary"]:
+                            continue
+                        data_dir = os.path.join(static_data_root, primary_class)
+                        if not os.path.isdir(data_dir):
+                            print(
+                                f"  Skipping static secondary for '{primary_class}': {data_dir} does not exist"
+                            )
+                            continue
+
+                        model_dir = f"models/model_static_static_{primary_class}"
+                        weights_path = os.path.join(
+                            model_dir, "train", "weights", "best.pt"
+                        )
+
+                        n_image = count_images_in_dataset(data_dir)
+
+                        if n_image[0] < 2:
+                            print(
+                                f"Error: Not enough images to train secondary static model "
+                                f"for primary class '{primary_class}' (found {n_image}, "
+                                f"need at least 2). Skipping this secondary model."
+                            )
+                            continue
+
+                        maybe_retrain(
+                            model_dir,
+                            data_dir,
+                            model_dir,
+                            weights_path,
+                            params["secondary_classifier"],
+                            params["secondary_epochs"],
+                            params["secondary_imgsz"],
+                        )
+
+                        if os.path.isfile(weights_path):
+                            try:
+                                if params["use_ncnn"] == "true":
+                                    secondary_static_models[primary_class] = (
+                                        load_model_with_ncnn_preference(
+                                            weights_path, "classify"
+                                        )
+                                    )
+                                else:
+                                    secondary_static_models[primary_class] = YOLO(
+                                        weights_path
+                                    )
+                            except Exception as e:
+                                print(
+                                    f"Warning: failed to load secondary static model for "
+                                    f"'{primary_class}': {e} — skipping at inference."
+                                )
+                        else:
+                            print(
+                                f"Secondary static model for '{primary_class}' has no "
+                                f"weights at {weights_path} — skipping at inference."
+                            )
+        else:
+            print(
+                "Using external secondary static model:",
+                params["secondary_static_external_model"],
+            )
+            from fishial_inference import FishInferenceEngine
+
+            secondary_static_models = FishInferenceEngine.from_bundle(
+                params["secondary_static_external_model"]
+            )
+
+        # Secondary MOTION classifiers — mirror of static block with same checks
+        secondary_motion_models = {}
+        motion_class_map = [
+            [None] * len(params["secondary_classes"])
+            for _ in range(len(params["primary_classes"]))
+        ]
+        if len(params["secondary_motion_classes"]) >= 2:
+            motion_data_root = params.get("secondary_motion_data_path", "")
+            if not motion_data_root or not os.path.isdir(motion_data_root):
+                print(
+                    f"Warning: secondary_motion_data_path '{motion_data_root}' does not exist; "
+                    "skipping all motion secondary models."
+                )
+            else:
                 for primary_class in params["primary_classes"]:
                     idx = params["primary_classes"].index(primary_class)
                     hotkey = params["primary_hotkeys"][idx]
 
-                    # Skip primaries that are themselves in the secondary set, or
-                    # in the ignore list, or have no annotation data on disk.
                     if hotkey in params["secondary_hotkeys"]:
                         continue
                     if primary_class in params["ignore_secondary"]:
                         continue
-                    data_dir = os.path.join(
-                        params["secondary_static_data_path"], primary_class
-                    )
+                    data_dir = os.path.join(motion_data_root, primary_class)
                     if not os.path.isdir(data_dir):
+                        print(
+                            f"  Skipping motion secondary for '{primary_class}': {data_dir} does not exist"
+                        )
                         continue
 
-                    model_dir = f"models/model_static_static_{primary_class}"
+                    model_dir = f"models/model_secondary_motion_{primary_class}"
                     weights_path = os.path.join(
                         model_dir, "train", "weights", "best.pt"
                     )
 
-                    # Not enough annotations -> leave weights absent, skip load.
-                    n_image = count_images_in_dataset(data_dir)
-
-                    if n_image[0] < 2:
+                    train_count, val_count = count_images_in_dataset(data_dir)
+                    if train_count < 2 or val_count < 2:
                         print(
-                            f"Error: Not enough images to train secondary static model "
-                            f"for primary class '{primary_class}' (found {n_image}, "
-                            f"need at least 2). Skipping this secondary model."
+                            f"Error: Not enough images to train secondary motion model "
+                            f"for primary class '{primary_class}' (found {train_count} training images and {val_count} validation images, "
+                            f"need at least 2 of each). Skipping this secondary model."
                         )
                         continue
 
@@ -571,113 +658,30 @@ def train_models():
                         params["secondary_imgsz"],
                     )
 
-                    # Load only if weights actually exist. maybe_retrain can
-                    # silently skip when first-time training isn't allowed.
                     if os.path.isfile(weights_path):
                         try:
                             if params["use_ncnn"] == "true":
-                                secondary_static_models[primary_class] = (
+                                secondary_motion_models[primary_class] = (
                                     load_model_with_ncnn_preference(
                                         weights_path, "classify"
                                     )
                                 )
                             else:
-                                secondary_static_models[primary_class] = YOLO(
+                                secondary_motion_models[primary_class] = YOLO(
                                     weights_path
                                 )
                         except Exception as e:
                             print(
-                                f"Warning: failed to load secondary static model for "
+                                f"Warning: failed to load secondary motion model for "
                                 f"'{primary_class}': {e} — skipping at inference."
                             )
                     else:
                         print(
-                            f"Secondary static model for '{primary_class}' has no "
+                            f"Secondary motion model for '{primary_class}' has no "
                             f"weights at {weights_path} — skipping at inference."
                         )
-        else:
-            print(
-                "Using external secondary static model:",
-                params["secondary_static_external_model"],
-            )
-            from fishial_inference import FishInferenceEngine
 
-            secondary_static_models = FishInferenceEngine.from_bundle(
-                params["secondary_static_external_model"]
-            )
-
-        # Secondary MOTION classifiers — mirror of the static block.
-        secondary_motion_models = {}
-        motion_class_map = [
-            [None] * len(params["secondary_classes"])
-            for _ in range(len(params["primary_classes"]))
-        ]
-        if len(params["secondary_motion_classes"]) >= 2:
-            for primary_class in params["primary_classes"]:
-                idx = params["primary_classes"].index(primary_class)
-                hotkey = params["primary_hotkeys"][idx]
-
-                if hotkey in params["secondary_hotkeys"]:
-                    continue
-                if primary_class in params["ignore_secondary"]:
-                    continue
-                data_dir = os.path.join(
-                    params["secondary_motion_data_path"], primary_class
-                )
-                if not os.path.isdir(data_dir):
-                    continue
-
-                model_dir = f"models/model_secondary_motion_{primary_class}"
-                weights_path = os.path.join(model_dir, "train", "weights", "best.pt")
-
-                train_count, val_count = count_images_in_dataset(data_dir)
-                if train_count < 2 or val_count < 2:
-                    print(
-                        f"Error: Not enough images to train secondary motion model "
-                        f"for primary class '{primary_class}' (found {train_count} training images and {val_count} validation images, "
-                        f"need at least 2 of each). Skipping this secondary model."
-                    )
-                    continue
-
-                maybe_retrain(
-                    model_dir,
-                    data_dir,
-                    model_dir,
-                    weights_path,
-                    params["secondary_classifier"],
-                    params["secondary_epochs"],
-                    params["secondary_imgsz"],
-                )
-
-                if os.path.isfile(weights_path):
-                    try:
-                        if params["use_ncnn"] == "true":
-                            secondary_motion_models[primary_class] = (
-                                load_model_with_ncnn_preference(
-                                    weights_path, "classify"
-                                )
-                            )
-                        else:
-                            secondary_motion_models[primary_class] = YOLO(weights_path)
-                    except Exception as e:
-                        print(
-                            f"Warning: failed to load secondary motion model for "
-                            f"'{primary_class}': {e} — skipping at inference."
-                        )
-                else:
-                    print(
-                        f"Secondary motion model for '{primary_class}' has no "
-                        f"weights at {weights_path} — skipping at inference."
-                    )
-
-    # ---- primary detectors --------------------------------------------
-    # These are trained AFTER the secondaries because in hierarchical mode
-    # the secondary annotations share source frames with primary annotations.
-
-    # check if external static model is specified, else train
-    # params['use_local_static_model'] is computed once in load_configs and
-    # consumed here AND in process_video(), so the two can no longer
-    # disagree about whether the local weights are supposed to exist.
+    # ---- primary detectors (unchanged) ---------------------------------
     if params["use_local_static_model"]:
         print("Training primary static model")
         if params["primary_static_classes"][0] != "0":
