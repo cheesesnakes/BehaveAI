@@ -614,7 +614,7 @@ def pseudo_label(params, args):
                     x1, y1, x2, y2 = det["coords"]
                     x1, y1 = max(0, x1), max(0, y1)
                     pc = det["primary_class"]
-                    crop_base = f"{base}_{i}"
+                    crop_base = f"{base}_{x1}_{y1}"
 
                     if crop_static is not None:
                         sc = raw[y1:y2, x1:x2]
