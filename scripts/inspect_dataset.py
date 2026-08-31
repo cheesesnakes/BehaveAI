@@ -843,6 +843,34 @@ def load_item(idx):
     item["_orig_secondary_crops"] = orig_crops
     # ----------------- END: record original secondary crop files for this item -----------------
 
+    # ----------------- BEGIN: report frames whose secondary crops are missing -----------------
+    if hierarchical_mode:
+
+        def _wants_secondary(b):
+            if len(b) < 6:
+                return False
+            pi = b[4]
+            if pi is None or pi < 0 or pi >= len(primary_classes):
+                return False
+            return primary_classes[pi] not in ignore_secondary
+
+        eligible = [b for b in boxes if _wants_secondary(b)]
+        unattached = [b for b in eligible if b[5] is None or b[5] < 0]
+
+        if eligible and not orig_crops:
+            print(
+                f"NO CROPS: {item['basename']} — {len(eligible)} box(es) but no crop "
+                f"files on disk; secondary classes are unrecoverable for this frame. "
+                f"Saving now would write crops from the CURRENT button selection."
+            )
+        elif unattached:
+            print(
+                f"PARTIAL CROPS: {item['basename']} — {len(unattached)}/{len(eligible)} "
+                f"box(es) had no matching crop ({len(orig_crops)} crop file(s) found "
+                f"for this frame)"
+            )
+    # ----------------- END: report frames whose secondary crops are missing -----------------
+
     # try to find and load video preview frames (replicating original sampling behaviour)
     video_path_found, guessed_frame = annotation_index.find_video_for_item(item)
     video_capture = None
