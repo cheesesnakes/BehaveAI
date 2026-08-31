@@ -167,6 +167,7 @@ class AnnotationIndex:
 
         # motion labels
         motion_lbl = item.get("motion_lbl")
+        print(motion_lbl)
         if motion_lbl and os.path.exists(motion_lbl):
             try:
                 with open(motion_lbl, "r") as f:
@@ -311,7 +312,6 @@ class AnnotationIndex:
         else:
             video_label_guess = item.get("basename", "")
             frame_number_guess = None
-
         # scan both cropped base dirs (motion then static)
         for base_crop_dir in (
             self.motion_cropped_base_dir,
@@ -348,6 +348,7 @@ class AnnotationIndex:
                         if key in box_index:
                             for bi in box_index[key]:
                                 b = boxes[bi]
+
                                 if len(b) >= 8:
                                     boxes[bi] = (
                                         b[0],
@@ -414,7 +415,6 @@ class AnnotationIndex:
                                         break
                             if matched:
                                 break
-
         return boxes
 
     # small helper used above (copied behaviour)
@@ -520,9 +520,16 @@ class AnnotationIndex:
 
         # --- delete cropped secondary images when hierarchical_mode is enabled ---
         # These use filenames like: <video_label>_<frame>_<x1>_<y1>.jpg
-        # ~ if self.hierarchical_mode and video_label is not None and frame_number is not None:
+        #
+        # FIX: match on base_filename + "_" and require the remainder to be
+        # exactly <x1>_<y1>. Matching on the bare base_filename let the prefix
+        # run past the frame-number boundary, so deleting frame 105 also removed
+        # the crops for 1050-1059, and deleting frame 10 removed 100-109 and
+        # 1000-1099. Only crops were affected — labels, masks and images are
+        # deleted by exact path above — so the frame kept its boxes and silently
+        # lost its secondary class assignments.
         if self.hierarchical_mode and base_filename is not None:
-            # ~ prefix = f"{video_label}_{frame_number}_"
+            prefix = f"{base_filename}_"
             for base_cropped_dir in (
                 self.motion_cropped_base_dir,
                 self.static_cropped_base_dir,
@@ -535,14 +542,25 @@ class AnnotationIndex:
                         lf = fname.lower()
                         if not any(lf.endswith(ext) for ext in image_exts):
                             continue
-                        # ~ if fname.startswith(prefix):
-                        if fname.startswith(base_filename):
-                            full = os.path.join(root, fname)
-                            if os.path.exists(full):
-                                try:
-                                    os.remove(full)
-                                    deleted.append(full)
-                                except Exception:
-                                    pass
+                        if not fname.startswith(prefix):
+                            continue
+                        # the remainder must be exactly <x1>_<y1>, so a longer
+                        # frame number can never be mistaken for a coordinate
+                        rest = os.path.splitext(fname)[0][len(prefix) :]
+                        bits = rest.split("_")
+                        if len(bits) != 2:
+                            continue
+                        try:
+                            int(bits[0])
+                            int(bits[1])
+                        except ValueError:
+                            continue
+                        full = os.path.join(root, fname)
+                        if os.path.exists(full):
+                            try:
+                                os.remove(full)
+                                deleted.append(full)
+                            except Exception:
+                                pass
 
         return deleted
