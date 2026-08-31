@@ -60,7 +60,7 @@ import sys
 import time
 
 import cv2
-import numpy as np
+from motion import advance_history, compose_motion_image
 
 # optional GUI prompt if INI not supplied
 try:
@@ -296,7 +296,7 @@ def generate_base_images(video_path, frame_num, params):
             prev_frames = [gray.copy()] * 3
             continue
 
-        current_diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
+        current_diffs = advance_history(prev_frames, gray, params)
 
         if params["strategy"] == "exponential":
             prev_frames[0] = gray
@@ -322,56 +322,7 @@ def generate_base_images(video_path, frame_num, params):
         return None, None
 
     # Build motion image (chromatic tail or normal)
-    if params["chromatic_tail_only"] == "true":
-        tb = cv2.subtract(diffs[0], diffs[1])
-        tr = cv2.subtract(diffs[2], diffs[1])
-        tg = cv2.subtract(diffs[1], diffs[0])
-
-        blue = cv2.addWeighted(
-            gray,
-            params["lum_weight"],
-            tb,
-            params["rgb_multipliers"][2],
-            params["motion_threshold"],
-        )
-        green = cv2.addWeighted(
-            gray,
-            params["lum_weight"],
-            tg,
-            params["rgb_multipliers"][1],
-            params["motion_threshold"],
-        )
-        red = cv2.addWeighted(
-            gray,
-            params["lum_weight"],
-            tr,
-            params["rgb_multipliers"][0],
-            params["motion_threshold"],
-        )
-    else:
-        blue = cv2.addWeighted(
-            gray,
-            params["lum_weight"],
-            diffs[0],
-            params["rgb_multipliers"][2],
-            params["motion_threshold"],
-        )
-        green = cv2.addWeighted(
-            gray,
-            params["lum_weight"],
-            diffs[1],
-            params["rgb_multipliers"][1],
-            params["motion_threshold"],
-        )
-        red = cv2.addWeighted(
-            gray,
-            params["lum_weight"],
-            diffs[2],
-            params["rgb_multipliers"][0],
-            params["motion_threshold"],
-        )
-
-    motion_img = cv2.merge([blue, green, red]).astype(np.uint8)
+    motion_img = compose_motion_image(gray, diffs, params)
 
     cap.release()
     return static_img, motion_img

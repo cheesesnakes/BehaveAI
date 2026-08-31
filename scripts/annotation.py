@@ -52,6 +52,7 @@ from tkinter import filedialog, ttk
 import cv2
 import numpy as np
 from index_annotations import AnnotationIndex
+from motion import advance_history, compose_motion_image
 from PIL import Image, ImageTk
 
 # YOLO is soft-required: the annotation tool still works for manual labelling
@@ -121,7 +122,7 @@ for base_dir in (static_cropped_base_dir, motion_cropped_base_dir):
         os.makedirs(base_dir, exist_ok=True)
     else:
         print(
-            f"Warning: crop base directory not set; hierarchical crops will not be saved."
+            "Warning: crop base directory not set; hierarchical crops will not be saved."
         )
 # ----------------------------------------------------------------------------
 
@@ -444,9 +445,9 @@ def iou(box1, box2):
     prop1 = inter / area1
     prop2 = inter / area2
     if prop1 > prop2:
-        return prop1 if prop1 > 0 else 0
+        return max(0, prop1)
     else:
-        return prop2 if prop2 > 0 else 0
+        return max(0, prop2)
 
 
 # ------------------------------
@@ -1116,7 +1117,7 @@ class AnnotatorTk:
                 color_hex = "#%02x%02x%02x" % (bgr[2], bgr[1], bgr[0])
             btn = tk.Button(
                 self.buttons_frame,
-                text="{} ({})".format(name, primary_classes_info[idx][0]),
+                text=f"{name} ({primary_classes_info[idx][0]})",
                 width=12,
                 relief="raised",
                 command=lambda i=idx: self.select_primary(i),
@@ -1135,7 +1136,7 @@ class AnnotatorTk:
                     color_hex = "#%02x%02x%02x" % (bgr[2], bgr[1], bgr[0])
                 btn = tk.Button(
                     self.buttons_frame,
-                    text="{} ({})".format(name, secondary_classes_info[idx][0]),
+                    text=f"{name} ({secondary_classes_info[idx][0]})",
                     width=12,
                     relief="raised",
                     command=lambda i=idx: self.select_secondary(i),
@@ -1304,7 +1305,7 @@ class AnnotatorTk:
             frame_number = 0
         frame_updated = True
         try:
-            self.frame_var.set(f"Frame {str(frame_number)}")
+            self.frame_var.set(f"Frame {frame_number!s}")
         except Exception:
             pass
         # redraw ticks to show current cursor
@@ -1332,10 +1333,8 @@ class AnnotatorTk:
         scaled_disp_h = max(1, int(round(disp_h * scale)))
 
         # if click is outside scaled main display, clamp to nearest edge
-        if cx < 0:
-            cx = 0
-        if cy < 0:
-            cy = 0
+        cx = max(cx, 0)
+        cy = max(cy, 0)
 
         # only map if inside scaled main display; if outside we still return nearest edge point
         # map back to display coords then to video coords
@@ -1348,8 +1347,8 @@ class AnnotatorTk:
 
     def video_to_canvas(self, vx, vy):
         disp_w, disp_h = self.display_size
-        cx = int(round((vx * disp_w / float(video_width))))
-        cy = int(round((vy * disp_h / float(video_height))))
+        cx = int(round(vx * disp_w / float(video_width)))
+        cy = int(round(vy * disp_h / float(video_height)))
         return (cx, cy)
 
     # Play/pause toggle
@@ -1934,7 +1933,7 @@ class AnnotatorTk:
                             if frame_count > frame_skip:
                                 frame_count = 0
                             continue
-                        diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
+                        diffs = advance_history(prev_frames, gray, params)
                         if strategy == "exponential":
                             prev_frames[0] = gray
                             prev_frames[1] = cv2.addWeighted(
@@ -1950,43 +1949,8 @@ class AnnotatorTk:
                     frame_count += 1
                     if frame_count > frame_skip:
                         frame_count = 0
-                if "diffs" in locals():
-                    if chromatic_tail_only == "true":
-                        tb = cv2.subtract(diffs[0], diffs[1])
-                        tr = cv2.subtract(diffs[2], diffs[1])
-                        tg = cv2.subtract(diffs[1], diffs[0])
-                        blue = cv2.addWeighted(
-                            gray, lum_weight, tb, rgb_multipliers[2], motion_threshold
-                        )
-                        green = cv2.addWeighted(
-                            gray, lum_weight, tg, rgb_multipliers[1], motion_threshold
-                        )
-                        red = cv2.addWeighted(
-                            gray, lum_weight, tr, rgb_multipliers[0], motion_threshold
-                        )
-                    else:
-                        blue = cv2.addWeighted(
-                            gray,
-                            lum_weight,
-                            diffs[0],
-                            rgb_multipliers[2],
-                            motion_threshold,
-                        )
-                        green = cv2.addWeighted(
-                            gray,
-                            lum_weight,
-                            diffs[1],
-                            rgb_multipliers[1],
-                            motion_threshold,
-                        )
-                        red = cv2.addWeighted(
-                            gray,
-                            lum_weight,
-                            diffs[2],
-                            rgb_multipliers[0],
-                            motion_threshold,
-                        )
-                    motion_image = cv2.merge((blue, green, red)).astype(np.uint8)
+                if diffs is not None:
+                    motion_image = compose_motion_image(gray, diffs, params)
                     original_frame = motion_image.copy()
 
                     try:

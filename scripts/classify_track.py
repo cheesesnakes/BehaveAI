@@ -60,6 +60,7 @@ import cv2
 import numpy as np
 import pandas as pd
 from load_configs import load_params
+from motion import create_motion_image
 from scipy.optimize import linear_sum_assignment
 from ultralytics import YOLO
 
@@ -1082,84 +1083,6 @@ class KalmanTracker:
 # ============================================================================
 
 
-def create_motion_image(prev_frames, gray):
-    """
-    Build the false-colour motion image and ADVANCE the frame history.
-
-    NOTE: this function MUTATES prev_frames. It must be called exactly once
-    per processed frame. Calling it per-detection (as an earlier version did
-    inside the secondary-classification loop) advances the history N times per
-    frame and corrupts the motion tails the detector was trained on.
-    """
-    diffs = [cv2.absdiff(prev_frames[j], gray) for j in range(3)]
-
-    if params["strategy"] == "exponential":
-        # Exponential decay — smoother tails.
-        prev_frames[0] = gray
-        prev_frames[1] = cv2.addWeighted(
-            prev_frames[1], params["expA"], gray, 1 - params["expA"], 0
-        )
-        prev_frames[2] = cv2.addWeighted(
-            prev_frames[2], params["expB"], gray, 1 - params["expB"], 0
-        )
-    elif params["strategy"] == "sequential":
-        # Plain frame-over-frame ring buffer.
-        prev_frames[2] = prev_frames[1]
-        prev_frames[1] = prev_frames[0]
-        prev_frames[0] = gray
-
-    # chromatic_tail_only: emphasise only the leading tail edge.
-    if params["chromatic_tail_only"] == "true":
-        tb = cv2.subtract(diffs[0], diffs[1])
-        tr = cv2.subtract(diffs[2], diffs[1])
-        tg = cv2.subtract(diffs[1], diffs[0])
-
-        blue = cv2.addWeighted(
-            gray,
-            params["lum_weight"],
-            tb,
-            params["rgb_multipliers"][2],
-            params["motion_threshold"],
-        )
-        green = cv2.addWeighted(
-            gray,
-            params["lum_weight"],
-            tg,
-            params["rgb_multipliers"][1],
-            params["motion_threshold"],
-        )
-        red = cv2.addWeighted(
-            gray,
-            params["lum_weight"],
-            tr,
-            params["rgb_multipliers"][0],
-            params["motion_threshold"],
-        )
-    else:
-        blue = cv2.addWeighted(
-            gray,
-            params["lum_weight"],
-            diffs[0],
-            params["rgb_multipliers"][2],
-            params["motion_threshold"],
-        )
-        green = cv2.addWeighted(
-            gray,
-            params["lum_weight"],
-            diffs[1],
-            params["rgb_multipliers"][1],
-            params["motion_threshold"],
-        )
-        red = cv2.addWeighted(
-            gray,
-            params["lum_weight"],
-            diffs[2],
-            params["rgb_multipliers"][0],
-            params["motion_threshold"],
-        )
-    return cv2.merge((blue, green, red)).astype(np.uint8)
-
-
 def build_tracker(fps):
     """
     Construct whichever tracker backend the config asks for.
@@ -1381,7 +1304,9 @@ def process_video(file):
             # previous per-detection call in Stage 4 was advancing the frame
             # history once per detection and corrupting the motion tails.
             motion_image = (
-                create_motion_image(prev_frames, gray) if need_motion_image else None
+                create_motion_image(prev_frames, gray, params)
+                if need_motion_image
+                else None
             )
 
             # ---- 3c: primary detections -------------------------------
