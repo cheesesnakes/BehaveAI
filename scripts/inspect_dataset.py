@@ -163,7 +163,6 @@ annotation_index = AnnotationIndex(
 )
 
 
-# ~ items = list_images_labels_and_masks()
 items = annotation_index.list_images_labels_and_masks()
 
 
@@ -341,8 +340,8 @@ def print_training_readiness_summary():
     else:
         print("  Primary static:  (not configured)")
 
-    primary_motion_classes = params.get("primary_motion_classes", [])
-    if primary_motion_classes and primary_motion_classes[0] != "0":
+    motion_classes = params.get("primary_motion_classes", [])
+    if motion_classes and motion_classes[0] != "0":
         _report_primary(
             "Primary motion",
             motion_train_images_dir,
@@ -354,10 +353,10 @@ def print_training_readiness_summary():
 
     # Secondary (hierarchical-only)
     if hierarchical_mode:
-        secondary_static_classes = params.get("secondary_static_classes", [])
-        secondary_motion_classes = params.get("secondary_motion_classes", [])
+        sec_static = params.get("secondary_static_classes", [])
+        sec_motion = params.get("secondary_motion_classes", [])
 
-        if len(secondary_static_classes) >= 2:
+        if len(sec_static) >= 2:
             _report_secondary(
                 "Secondary static (per primary class)",
                 static_cropped_base_dir,
@@ -366,7 +365,7 @@ def print_training_readiness_summary():
                 _SECONDARY_MIN_IMAGES,
             )
 
-        if len(secondary_motion_classes) >= 2:
+        if len(sec_motion) >= 2:
             _report_secondary(
                 "Secondary motion (per primary class)",
                 motion_cropped_base_dir,
@@ -393,51 +392,6 @@ if not items:
         motion_val_images_dir,
     )
     sys.exit(1)
-
-
-# Build list of annotated images
-def list_images_labels_and_masks():
-    items = {}
-
-    def add_dir(img_dir, lbl_dir):
-        if not os.path.isdir(img_dir):
-            return
-        for fname in os.listdir(img_dir):
-            if fname.lower().endswith((".jpg", ".jpeg", ".png")):
-                base = os.path.splitext(fname)[0]
-                img_path = os.path.join(img_dir, fname)
-                lbl_path = (
-                    os.path.join(lbl_dir, base + ".txt")
-                    if os.path.isdir(lbl_dir)
-                    else None
-                )
-                mask_dir = lbl_dir.replace("labels", "masks") if lbl_dir else None
-                mask_path = (
-                    os.path.join(mask_dir, base + ".mask.txt")
-                    if mask_dir and os.path.isdir(mask_dir)
-                    else None
-                )
-                rec = items.setdefault(base, {})
-                if "static_img" not in rec:
-                    rec["static_img"] = img_path
-                    rec["static_lbl"] = (
-                        lbl_path if lbl_path and os.path.exists(lbl_path) else None
-                    )
-                    rec["static_mask"] = (
-                        mask_path if mask_path and os.path.exists(mask_path) else None
-                    )
-                    rec["static_origin_img_dir"] = img_dir
-                    rec["static_origin_lbl_dir"] = lbl_dir
-
-    add_dir(static_train_images_dir, static_train_labels_dir)
-    add_dir(static_val_images_dir, static_val_labels_dir)
-    add_dir(motion_train_images_dir, motion_train_labels_dir)
-    add_dir(motion_val_images_dir, motion_val_labels_dir)
-
-    ordered = []
-    for base, rec in sorted(items.items()):
-        ordered.append({"basename": base, **rec})
-    return ordered
 
 
 current_idx = 0
@@ -490,7 +444,6 @@ last_anim_draw = 0.0
 ANIM_DT = 1.0 / ANIM_FPS
 
 
-# helper functions copied/adapted from your inspector code
 def norm_to_pixels(xc, yc, bw, bh, w, h):
     cx = float(xc) * w
     cy = float(yc) * h
@@ -516,37 +469,59 @@ def build_window_title(basename):
     return " ".join(elements)
 
 
-#
-# if item.get("motion_lbl") and os.path.exists(item["motion_lbl"]):
-#    with open(item["motion_lbl"], "r") as f:
-#        for line in f:
-#            parts = line.strip().split()
-#            if len(parts) < 5:
-#                continue
-#            cls = int(parts[0])
-#            xc, yc, bw, bh = parts[1:5]
-#            h, w = original_frame.shape[:2]
-#            x1, y1, x2, y2 = norm_to_pixels(xc, yc, bw, bh, w, h)
-#            global_primary_cls = cls + len(primary_static_classes)
-#
-#            if hierarchical_mode:
-#                boxes.append((x1, y1, x2, y2, global_primary_cls, -1, -1, -1))
-#            else:
-#                boxes.append((x1, y1, x2, y2, global_primary_cls, -1))
-#
-# mask_path = item.get("static_mask") or item.get("motion_mask")
-#
-# if mask_path and os.path.exists(mask_path):
-#    with open(mask_path, "r") as f:
-#        for line in f:
-#            parts = line.strip().split()
-#            if len(parts) >= 4:
-#                gx1, gy1, gx2, gy2 = map(int, parts[:4])
-#                grey_boxes.append((gx1, gy1, gx2, gy2))
-#
-
 video_capture = None
 video_frame_index = None
+
+
+def collect_secondary_crops_for_item(item):
+    """
+    Return the set of secondary crop files that exist on disk right now for
+    this item's video/frame. Stored on the item so save() can tell which
+    crops it is replacing.
+    """
+    orig_crops = set()
+    base = item["basename"]
+    if "_" in base:
+        video_label_part, tail = base.rsplit("_", 1)
+        try:
+            frame_num = int(tail)
+        except Exception:
+            frame_num = None
+    else:
+        video_label_part = base
+        frame_num = None
+
+    for base_crop_dir in (motion_cropped_base_dir, static_cropped_base_dir):
+        if not base_crop_dir or not os.path.isdir(base_crop_dir):
+            continue
+        for primary_name in os.listdir(base_crop_dir):
+            primary_dir = os.path.join(base_crop_dir, primary_name)
+            if not os.path.isdir(primary_dir):
+                continue
+            for secondary_name in os.listdir(primary_dir):
+                sec_dir = os.path.join(primary_dir, secondary_name)
+                if not os.path.isdir(sec_dir):
+                    continue
+                for fn in os.listdir(sec_dir):
+                    if not fn.lower().endswith((".jpg", ".jpeg", ".png")):
+                        continue
+                    stem = os.path.splitext(fn)[0]
+                    parts = stem.split("_")
+                    if len(parts) < 4:
+                        continue
+                    try:
+                        int(parts[-1])  # y1
+                        int(parts[-2])  # x1
+                        frame_fn = int(parts[-3])
+                        video_label_part_fn = "_".join(parts[:-3])
+                    except Exception:
+                        continue
+                    if (
+                        video_label_part_fn == video_label_part
+                        and frame_fn == frame_num
+                    ):
+                        orig_crops.add(os.path.join(sec_dir, fn))
+    return orig_crops
 
 
 def load_item(idx):
@@ -559,28 +534,32 @@ def load_item(idx):
         raw_buf, \
         video_label, \
         video_capture, \
-        video_path, \
         video_frame_index, \
         video_height, \
         video_width
     boxes = []
     grey_boxes = []
     raw_buf.clear()
+
+    # FIX: this used to load labels for items[current_idx] regardless of the
+    # idx it was asked for, so a caller that hadn't already updated
+    # current_idx got the previous frame's boxes.
     item = items[idx]
     video_label = item["basename"]
-    # load static image (fr) and motion image (original_frame) - if one missing copy the other
+
+    # load static image (fr) and motion image (original_frame);
+    # if one is missing, copy the other
     static_img = item.get("static_img")
     motion_img = item.get("motion_img")
-    # prefer static image to be fr and motion to be original_frame
     fr_img = None
     motion_img_cv = None
     if static_img and os.path.exists(static_img):
         fr_img = cv2.imread(static_img)
     if motion_img and os.path.exists(motion_img):
         motion_img_cv = cv2.imread(motion_img)
-    # fallback: if only one exists use it for both
+
     if fr_img is None and motion_img_cv is None:
-        # try to find image by searching both static and motion dirs using basename
+        # last resort: search both stream dirs by basename
         possible = []
         for d in [
             static_train_images_dir,
@@ -593,7 +572,7 @@ def load_item(idx):
                 possible.append(p)
         if possible:
             fr_img = cv2.imread(possible[0])
-            motion_img_cv = fr_img.copy()
+            motion_img_cv = fr_img.copy() if fr_img is not None else None
     else:
         if fr_img is None and motion_img_cv is not None:
             fr_img = motion_img_cv.copy()
@@ -601,7 +580,6 @@ def load_item(idx):
             motion_img_cv = fr_img.copy()
 
     if fr_img is None:
-        # create blank placeholder
         fr_img = np.zeros((video_height, video_width, 3), dtype=np.uint8)
     if motion_img_cv is None:
         motion_img_cv = fr_img.copy()
@@ -622,228 +600,19 @@ def load_item(idx):
     for _ in range(raw_buf.maxlen):
         raw_buf.append(fr.copy())
 
-    # load labels and masks
-    # ~ load_labels_and_masks_for_item(item)
-    # ~ boxes, grey_boxes = _ann_index.load_labels_and_masks_for_item(item, fr, original_frame)
+    # Load labels and masks. AnnotationIndex.load_labels_and_masks_for_item
+    # already attaches the secondary crops, so there is no second pass here —
+    # the inspector used to repeat that whole matching loop inline.
     boxes, grey_boxes = annotation_index.load_labels_and_masks_for_item(
-        items[current_idx], fr, original_frame
+        item, fr, original_frame
     )
 
-    # ----------------- Link secondary crops to primary boxes -----------------
-    # Only run when hierarchical mode is enabled
-    if hierarchical_mode and boxes:
-        # tolerance for small rounding/resizing differences (px)
-        MATCH_TOL = 2
-
-        # derive video_label and frame_number from item's basename (split on last underscore)
-        if "_" in item["basename"]:
-            video_label_guess, tail = item["basename"].rsplit("_", 1)
-            try:
-                frame_number_guess = int(tail)
-            except Exception:
-                frame_number_guess = None
-        else:
-            video_label_guess = item["basename"]
-            frame_number_guess = None
-
-        # build map of boxes keyed by (x1, y1, primary_name) -> list of box indices
-        box_index = {}
-        for bi, b in enumerate(boxes):
-            # hierarchical box structure: (x1,y1,x2,y2, primary_cls, secondary_cls, conf, secondary_conf)
-            bx1 = int(round(b[0]))
-            by1 = int(round(b[1]))
-            primary_idx = b[4] if len(b) > 4 else None
-            primary_name = (
-                primary_classes[primary_idx]
-                if primary_idx is not None and primary_idx < len(primary_classes)
-                else None
-            )
-            key = (bx1, by1, primary_name)
-            box_index.setdefault(key, []).append(bi)
-
-        # helper to parse crop filename format: <video_label>_<frame>_<x1>_<y1>.<ext>
-        def _parse_crop_filename(fn):
-            stem = os.path.splitext(fn)[0]
-            parts = stem.split("_")
-            if len(parts) < 4:
-                return None
-            try:
-                y1 = int(parts[-1])
-                x1 = int(parts[-2])
-                frame = int(parts[-3])
-                video_label_part = "_".join(parts[:-3])
-                return video_label_part, frame, x1, y1
-            except Exception:
-                return None
-
-        # helper to map secondary dir-name to index in secondary_classes
-        sec_name_to_idx = {name: idx for idx, name in enumerate(secondary_classes)}
-
-        # search both cropped base dirs (motion then static)
-        for base_crop_dir in (motion_cropped_base_dir, static_cropped_base_dir):
-            if not base_crop_dir or not os.path.isdir(base_crop_dir):
-                continue
-            # primary class directories inside the cropped base dir
-            for primary_name in os.listdir(base_crop_dir):
-                prim_dir = os.path.join(base_crop_dir, primary_name)
-                if not os.path.isdir(prim_dir):
-                    continue
-                # secondary class directories under the primary dir
-                for secondary_name in os.listdir(prim_dir):
-                    sec_dir = os.path.join(prim_dir, secondary_name)
-                    if not os.path.isdir(sec_dir):
-                        continue
-                    sec_idx = sec_name_to_idx.get(secondary_name)
-                    if sec_idx is None:
-                        # not in configured secondary list, skip
-                        continue
-                    # scan crop files
-                    for fn in os.listdir(sec_dir):
-                        lower = fn.lower()
-                        if not lower.endswith((".jpg", ".jpeg", ".png")):
-                            continue
-                        parsed = _parse_crop_filename(fn)
-                        if parsed is None:
-                            continue
-                        vlabel_part, fn_frame, x1_fn, y1_fn = parsed
-                        # must be same video label and frame
-                        if (
-                            vlabel_part != video_label_guess
-                            or fn_frame != frame_number_guess
-                        ):
-                            continue
-                        # exact key match first (primary_name must match so we attach secondary to correct primary)
-                        key = (x1_fn, y1_fn, primary_name)
-                        matched = False
-                        if key in box_index:
-                            for bi in box_index[key]:
-                                b = boxes[bi]
-                                # update secondary index in place (preserve other fields)
-                                if len(b) >= 8:
-                                    boxes[bi] = (
-                                        b[0],
-                                        b[1],
-                                        b[2],
-                                        b[3],
-                                        b[4],
-                                        sec_idx,
-                                        b[6],
-                                        b[7],
-                                    )
-                                else:
-                                    # convert shorter tuple into hierarchical format
-                                    primary_cls = b[4] if len(b) > 4 else 0
-                                    conf = b[6] if len(b) > 6 else -1
-                                    boxes[bi] = (
-                                        b[0],
-                                        b[1],
-                                        b[2],
-                                        b[3],
-                                        primary_cls,
-                                        sec_idx,
-                                        conf,
-                                        -1,
-                                    )
-                                matched = True
-                        if matched:
-                            continue
-                        # if not exact, try small neighbourhood search
-                        for dx in range(-MATCH_TOL, MATCH_TOL + 1):
-                            if matched:
-                                break
-                            for dy in range(-MATCH_TOL, MATCH_TOL + 1):
-                                cand = (x1_fn + dx, y1_fn + dy, primary_name)
-                                if cand in box_index:
-                                    for bi in box_index[cand]:
-                                        b = boxes[bi]
-                                        if len(b) >= 8:
-                                            boxes[bi] = (
-                                                b[0],
-                                                b[1],
-                                                b[2],
-                                                b[3],
-                                                b[4],
-                                                sec_idx,
-                                                b[6],
-                                                b[7],
-                                            )
-                                        else:
-                                            primary_cls = b[4] if len(b) > 4 else 0
-                                            conf = b[6] if len(b) > 6 else -1
-                                            boxes[bi] = (
-                                                b[0],
-                                                b[1],
-                                                b[2],
-                                                b[3],
-                                                primary_cls,
-                                                sec_idx,
-                                                conf,
-                                                -1,
-                                            )
-                                        matched = True
-                                        break
-                                    if matched:
-                                        break
-                            if matched:
-                                break
-    # ----------------- END link secondary crops to primary boxes -----------------
-
-    # ----------------- BEGIN: record original secondary crop files for this item -----------------
-    # Build a set of full paths for any secondary crop files that exist now for this item.
-    # Stored on item['_orig_secondary_crops'] so we can detect deletions later.
-    orig_crops = set()
-    # parse video_label and frame_number from basename
-    if "_" in item["basename"]:
-        _video_label_part, _tail = item["basename"].rsplit("_", 1)
-        try:
-            _frame_num = int(_tail)
-        except Exception:
-            _frame_num = None
-    else:
-        _video_label_part = item["basename"]
-        _frame_num = None
-
-    # scan both cropped bases and collect matching filenames for this video/frame
-    for base_crop_dir in (motion_cropped_base_dir, static_cropped_base_dir):
-        if not base_crop_dir or not os.path.isdir(base_crop_dir):
-            continue
-        for primary_name in os.listdir(base_crop_dir):
-            primary_dir = os.path.join(base_crop_dir, primary_name)
-            if not os.path.isdir(primary_dir):
-                continue
-            for secondary_name in os.listdir(primary_dir):
-                sec_dir = os.path.join(primary_dir, secondary_name)
-                if not os.path.isdir(sec_dir):
-                    continue
-                for fn in os.listdir(sec_dir):
-                    low = fn.lower()
-                    if not low.endswith((".jpg", ".jpeg", ".png")):
-                        continue
-                    # try to parse pattern: <video_label>_<frame>_<x1>_<y1>.<ext>
-                    stem = os.path.splitext(fn)[0]
-                    parts = stem.split("_")
-                    if len(parts) < 4:
-                        continue
-                    try:
-                        y1_fn = int(parts[-1])
-                        x1_fn = int(parts[-2])
-                        frame_fn = int(parts[-3])
-                        video_label_part_fn = "_".join(parts[:-3])
-                    except Exception:
-                        continue
-                    # only keep files for this item (same video label + same frame)
-                    if (
-                        video_label_part_fn == _video_label_part
-                        and frame_fn == _frame_num
-                    ):
-                        full = os.path.join(sec_dir, fn)
-                        orig_crops.add(full)
-
-    # attach to item for later comparison in save
+    # Record which secondary crop files exist right now, so save() can detect
+    # deletions later.
+    orig_crops = collect_secondary_crops_for_item(item)
     item["_orig_secondary_crops"] = orig_crops
-    # ----------------- END: record original secondary crop files for this item -----------------
 
-    # ----------------- BEGIN: report frames whose secondary crops are missing -----------------
+    # ----------------- report frames whose secondary crops are missing -----------------
     if hierarchical_mode:
 
         def _wants_secondary(b):
@@ -869,9 +638,9 @@ def load_item(idx):
                 f"box(es) had no matching crop ({len(orig_crops)} crop file(s) found "
                 f"for this frame)"
             )
-    # ----------------- END: report frames whose secondary crops are missing -----------------
+    # ----------------- END report -----------------
 
-    # try to find and load video preview frames (replicating original sampling behaviour)
+    # try to find and load video preview frames
     video_path_found, guessed_frame = annotation_index.find_video_for_item(item)
     video_capture = None
     video_frame_index = guessed_frame
@@ -879,32 +648,26 @@ def load_item(idx):
         try:
             video_capture = cv2.VideoCapture(video_path_found)
 
-            # If guessed_frame is known and capture opened, we want to build a buffer
-            # of base_N frames that *end* at guessed_frame (i.e. guessed_frame is the last frame).
+            # If guessed_frame is known and capture opened, build a buffer of
+            # base_N frames that *ends* at guessed_frame.
             if guessed_frame is not None and video_capture.isOpened():
                 total = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
-                base_N = raw_buf.maxlen  # frameWindow_base (number of frames we want)
+                base_N = raw_buf.maxlen  # frameWindow_base
                 step = frame_skip + 1  # sampling interval
-                total_to_read = (
-                    base_N * step
-                )  # how many raw frames to read in worst case
+                total_to_read = base_N * step
 
                 def _read_buffer_ending_at(last_frame):
                     """
-                    Read frames so that the returned buffer contains up to `base_N` frames
-                    sampled every `step` frames, and the buffer *ends* at `last_frame`.
-                    Returns (buf_list, start_frame_used, last_index_appended).
+                    Read frames so the returned buffer holds up to `base_N`
+                    frames sampled every `step` frames and *ends* at
+                    `last_frame`. Returns (buf, start_frame, last_index).
                     """
-                    # compute start index so that last appended index would be last_frame
-                    # appended indices will be: s + 0, s + step, s + 2*step, ..., s + (len(buf)-1)*step
                     start_frame = int(last_frame - (base_N - 1) * step)
-                    # clamp start
                     start_frame = max(0, min(start_frame, max(0, total - 1)))
                     video_capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
                     buf = []
                     read_count = 0
-                    idx = start_frame
-                    # read up to total_to_read raw frames, appending every 'step' frames
+                    idx_r = start_frame
                     while read_count < total_to_read:
                         ret, f = video_capture.read()
                         if not ret:
@@ -916,22 +679,18 @@ def load_item(idx):
                                 )
                             buf.append(f.copy())
                             if len(buf) >= base_N:
-                                # compute last appended frame index
                                 last_appended = start_frame + ((len(buf) - 1) * step)
                                 return buf, start_frame, last_appended
                         read_count += 1
-                        idx += 1
-                        if idx > total - 1:
+                        idx_r += 1
+                        if idx_r > total - 1:
                             break
-                    # if we didn't reach base_N, compute last appended appropriately
                     if buf:
                         last_appended = start_frame + ((len(buf) - 1) * step)
                     else:
                         last_appended = start_frame - 1
                     return buf, start_frame, last_appended
 
-                # Try a few candidates (centered on guessed_frame) to allow for small offsets.
-                # Each candidate is a last-frame index we'd like the buffer to end at.
                 candidates = [guessed_frame - 1, guessed_frame, guessed_frame + 1]
                 best_buf = None
                 best_last = None
@@ -946,14 +705,13 @@ def load_item(idx):
                         return float("inf")
 
                 for cand_last in candidates:
-                    # skip out-of-range candidates
                     if cand_last < 0 or cand_last > total - 1:
                         continue
                     buf, s, last_idx = _read_buffer_ending_at(cand_last)
                     if not buf:
                         continue
-                    # IMPORTANT: compare the LAST buffer frame to fr, because basenames
-                    # now store the *last* frame of the motion window.
+                    # compare the LAST buffer frame to fr, because basenames
+                    # store the *last* frame of the motion window.
                     if fr is not None:
                         score = _frame_diff(buf[-1], fr)
                     else:
@@ -963,55 +721,32 @@ def load_item(idx):
                         best_buf = buf
                         best_last = last_idx
 
-                # fallback: try guessed_frame directly if none chosen
+                # fallback: try guessed_frame directly if none chosen.
+                # FIX: this used to unpack three values into two names, which
+                # raised ValueError and dropped straight into the except below,
+                # silently killing the video preview instead of using it.
                 if best_buf is None:
                     buf, s, last_idx = _read_buffer_ending_at(guessed_frame)
                     if buf:
-                        best_buf, best_last = buf, s, last_idx
+                        best_buf = buf
+                        best_last = last_idx
 
                 if best_buf is not None:
                     raw_buf.clear()
                     for f in best_buf:
                         raw_buf.append(f)
-                    # video_frame_index is the last appended frame index (i.e. the saved frame number)
                     video_frame_index = best_last
 
         except Exception:
             video_capture = None
 
 
-# populate motion_img keys for items (unchanged)
-for it in items:
-    base = it["basename"]
-    p1 = os.path.join(motion_train_images_dir, base + ".jpg")
-    p2 = os.path.join(motion_val_images_dir, base + ".jpg")
-    if os.path.exists(p1):
-        it["motion_img"] = p1
-        it["motion_lbl"] = os.path.join(motion_train_labels_dir, base + ".txt")
-        it["motion_mask"] = os.path.join(
-            motion_train_labels_dir.replace("labels", "masks"), base + ".mask.txt"
-        )
-    elif os.path.exists(p2):
-        it["motion_img"] = p2
-        it["motion_lbl"] = os.path.join(motion_val_labels_dir, base + ".txt")
-        it["motion_mask"] = os.path.join(
-            motion_val_labels_dir.replace("labels", "masks"), base + ".mask.txt"
-        )
-    if it.get("static_img"):
-        base_lbl = os.path.join(it["static_origin_lbl_dir"], it["basename"] + ".txt")
-        it["static_lbl"] = base_lbl if os.path.exists(base_lbl) else None
-        base_mask = os.path.join(
-            it["static_origin_lbl_dir"].replace("labels", "masks"),
-            it["basename"] + ".mask.txt",
-        )
-        it["static_mask"] = base_mask if os.path.exists(base_mask) else None
-
 # load first item synchronously so UI has initial data
 load_item(current_idx)
 print("Starting inspection of annotation dataset. Items found:", len(items))
 
 
-# Drawing helpers (adapted)
+# Drawing helpers
 def draw_boxes(frame):
     for box in boxes:
         if hierarchical_mode:
@@ -1020,7 +755,7 @@ def draw_boxes(frame):
             y1 = int(y1 * disp_scale_factor)
             x2 = int(x2 * disp_scale_factor)
             y2 = int(y2 * disp_scale_factor)
-            if primary_classes[primary_cls] in ignore_secondary:
+            if primary_classes[primary_cls] in ignore_secondary or secondary_cls < 0:
                 label = f"{primary_classes[primary_cls].upper()}"
                 if conf != -1:
                     label = label + f" {conf:.2f}"
@@ -1053,20 +788,21 @@ def draw_boxes(frame):
                     cv2.LINE_AA,
                 )
             else:
+                # Primary-coloured halo hugging a secondary-coloured box.
+                # The outer rect used to be offset by the FULL outer_thickness,
+                # which left a gap and read as two separate boxes; offsetting
+                # by half the combined stroke width makes the two flush.
                 outer_thickness = line_thickness + 2
+                pad = (outer_thickness + line_thickness) // 2
                 cv2.rectangle(
                     frame,
-                    (x1 - outer_thickness, y1 - outer_thickness),
-                    (x2 + outer_thickness, y2 + outer_thickness),
+                    (x1 - pad, y1 - pad),
+                    (x2 + pad, y2 + pad),
                     primary_colors[primary_cls],
                     outer_thickness,
                 )
                 label = f"{primary_classes[primary_cls].upper()}"
-                # ~ if conf != -1:
-                # ~ label = label + f' {conf:.2f}'
                 label = label + f" {secondary_classes[secondary_cls]}"
-                # ~ if secondary_conf != -1:
-                # ~ label = label + f' {secondary_conf:.2f}'
                 label_size, _ = cv2.getTextSize(
                     label, cv2.FONT_HERSHEY_SIMPLEX, font_size, line_thickness
                 )
@@ -1149,20 +885,18 @@ def draw_zoom(disp, cursor_pos_in):
     cx = int(cx)
     cy = int(cy)
     h = int(video_height)
-    # w = int(video_width)
 
-    # widget size chosen relative to video height (same idea as annotation redraw)
+    # widget size chosen relative to video height
     widget_size = max(32, int(h / 3))
 
     # magnifications
     MAG = 2.0
     MAG_ANIM = 1.0
 
-    # compute crop sizes in VIDEO pixels (smaller crop -> magnified when resized to widget_size)
+    # crop sizes in VIDEO pixels (smaller crop -> magnified at widget_size)
     crop_vid = max(2, int(round(widget_size / MAG)))  # top/mid  -> 2x
-    crop_vid_anim = max(2, int(round(widget_size / MAG_ANIM)))  # anim -> 1x (same size)
+    crop_vid_anim = max(2, int(round(widget_size / MAG_ANIM)))  # anim -> 1x
 
-    # padded crop helper (returns crop and original crop box (x1,y1,x2,y2) in video coords)
     def padded_crop(src, cx, cy, crop_size):
         h_src, w_src = src.shape[:2]
         x1 = int(cx - crop_size // 2)
@@ -1194,10 +928,8 @@ def draw_zoom(disp, cursor_pos_in):
         if 0 <= rel_x < crop_vid and 0 <= rel_y < crop_vid:
             zx = int(round(rel_x * widget_size / crop_vid))
             zy = int(round(rel_y * widget_size / crop_vid))
-            # single-pixel crosshair inside zoom pane
             cv2.line(z_top, (0, zy), (widget_size - 1, zy), (255, 255, 255), 1)
             cv2.line(z_top, (zx, 0), (zx, widget_size - 1), (255, 255, 255), 1)
-        # hairline black border
         cv2.rectangle(z_top, (0, 0), (widget_size - 1, widget_size - 1), (0, 0, 0), 1)
 
     # --- mid zoom (motion) ---
@@ -1219,11 +951,9 @@ def draw_zoom(disp, cursor_pos_in):
     # --- bottom zoom (animation, 1x) ---
     z_bot = None
     if len(raw_buf) == raw_buf.maxlen and len(raw_buf) > 0:
-        # always update animation (no gating)
         idx = int(((time.time() - last_mouse_move) * ANIM_FPS) % raw_buf.maxlen)
         small = raw_buf[idx]
         small_crop, crop_box = padded_crop(small, cx, cy, crop_vid_anim)
-        # resize to widget_size (crop_vid_anim == widget_size so this is 1x or nearest)
         z_bot = cv2.resize(
             small_crop, (widget_size, widget_size), interpolation=cv2.INTER_LINEAR
         )
@@ -1231,25 +961,20 @@ def draw_zoom(disp, cursor_pos_in):
         z_bot = np.zeros((widget_size, widget_size, 3), dtype=np.uint8)
     cv2.rectangle(z_bot, (0, 0), (widget_size - 1, widget_size - 1), (0, 0, 0), 1)
 
-    # --- place zooms immediately to the right of the main display (no gap) ---
-    # compute placement in the disp image (disp is in display pixels already)
-    # use disp_scale_factor to compute pixel offset for main display width
+    # --- place zooms immediately to the right of the main display ---
     pos_x = int(round(video_width * disp_scale_factor))
     pos_y = 0
 
     h_disp, w_disp = disp.shape[:2]
-    # place top
     if z_top is not None:
         zh, zw = z_top.shape[:2]
         if pos_x + zw <= w_disp and pos_y + zh <= h_disp:
             disp[pos_y : pos_y + zh, pos_x : pos_x + zw] = z_top[0:zh, 0:zw]
-    # place mid
     if z_mid is not None:
         zh, zw = z_mid.shape[:2]
         y_off = pos_y + widget_size
         if pos_x + zw <= w_disp and y_off + zh <= h_disp:
             disp[y_off : y_off + zh, pos_x : pos_x + zw] = z_mid[0:zh, 0:zw]
-    # place bot (animation)
     if z_bot is not None:
         zh, zw = z_bot.shape[:2]
         y_off = pos_y + 2 * widget_size
@@ -1261,8 +986,6 @@ def refresh_display():
     global original_frame, fr, cursor_pos, disp_scale_factor
     if original_frame is None or fr is None:
         return None
-    # cursor_pos is in VIDEO PIXELS already
-    x, y = cursor_pos
     h, w = original_frame.shape[:2]
     # build composite (video area + bottom bar + right zoom column)
     canvas = np.zeros(
@@ -1286,15 +1009,12 @@ def refresh_display():
     draw_boxes(disp)
     draw_zoom(disp, cursor_pos)
 
-    # draw crosshair limited to the *main* video area (do not cross the right zoom column)
+    # crosshair, limited to the *main* video area
     try:
         cx = int(round(cursor_pos[0] * disp_scale_factor))
         cy = int(round(cursor_pos[1] * disp_scale_factor))
-        h_disp, w_disp = disp.shape[:2]
-        # main video area size in disp coordinates
         main_w = int(round(video_width * disp_scale_factor))
         main_h = int(round(video_height * disp_scale_factor))
-        # only draw vertical line inside main_w and between 0..main_h
         if 0 <= cx < main_w and 0 <= cy < main_h:
             cv2.line(
                 disp, (cx, 0), (cx, main_h), (255, 255, 255), max(1, line_thickness)
@@ -1309,8 +1029,10 @@ def refresh_display():
 
 # ---------- SAVING: overwrite the *same* files we loaded --------------------
 def save_annotation_and_overwrite_current():
-    """Overwrite the image(s), label(s) and mask(s) for the current item with the modified boxes/grey_boxes.
-    Respects original origin directories so we don't shuffle train/val assignments.
+    """
+    Overwrite the image(s), label(s) and mask(s) for the current item with the
+    modified boxes/grey_boxes, respecting the origin directories so train/val
+    assignments don't get shuffled.
     """
     global items, current_idx, fr, original_frame, boxes, grey_boxes, annot_count
     item = items[current_idx]
@@ -1320,30 +1042,48 @@ def save_annotation_and_overwrite_current():
     if deleted:
         print("Overwriting existing annotation")
 
-    # Determine target paths (use origin dirs stored earlier)
-    static_img_dir = item.get("static_origin_img_dir")
-    static_lbl_dir = item.get("static_origin_lbl_dir")
-    motion_img_dir = None
-    motion_lbl_dir = None
-
-    # if the item originally had motion image, use that origin; else try to guess by checking both motion dirs
-    if item.get("motion_img"):
-        if motion_train_images_dir in item.get("motion_img", ""):
-            motion_img_dir = motion_train_images_dir
-            motion_lbl_dir = motion_train_labels_dir
-        else:
-            motion_img_dir = motion_val_images_dir
-            motion_lbl_dir = motion_val_labels_dir
-    else:
-        # if no motion origin known, keep image where static exists (fallback)
-        if static_img_dir and "annot_motion" in static_img_dir:
-            motion_img_dir = static_img_dir
-            motion_lbl_dir = static_lbl_dir
-
-    # write static image & labels (if original static path is present OR there is at least one static-class box)
     h, w = original_frame.shape[:2]
 
-    # produce static annotated frame (grey areas applied)
+    # Count static vs motion boxes first — the counts decide which streams
+    # need directories.
+    static_count = 0
+    motion_count = 0
+    for box in boxes:
+        if box[4] < len(primary_static_classes):
+            static_count += 1
+        else:
+            motion_count += 1
+
+    # Target directories come straight from the per-stream origin keys now.
+    # Previously a motion-only frame reported its motion dirs under the
+    # static_origin_* keys, so the static labels were written to the motion
+    # label path and then immediately overwritten by the motion labels.
+    static_img_dir = item.get("static_origin_img_dir")
+    static_lbl_dir = item.get("static_origin_lbl_dir")
+    motion_img_dir = item.get("motion_origin_img_dir")
+    motion_lbl_dir = item.get("motion_origin_lbl_dir")
+
+    def _is_val_dir(d):
+        if not d:
+            return False
+        nd = os.path.normpath(d)
+        return nd in (
+            os.path.normpath(static_val_images_dir),
+            os.path.normpath(motion_val_images_dir),
+        )
+
+    # If a stream has gained boxes but has no directory yet, inherit the other
+    # stream's split rather than defaulting to train.
+    is_val = _is_val_dir(static_img_dir) or _is_val_dir(motion_img_dir)
+
+    if static_count > 0 and not static_img_dir:
+        static_img_dir = static_val_images_dir if is_val else static_train_images_dir
+        static_lbl_dir = static_val_labels_dir if is_val else static_train_labels_dir
+    if motion_count > 0 and not motion_img_dir:
+        motion_img_dir = motion_val_images_dir if is_val else motion_train_images_dir
+        motion_lbl_dir = motion_val_labels_dir if is_val else motion_train_labels_dir
+
+    # produce annotated frames (grey areas applied)
     static_ann_frame = fr.copy()
     motion_ann_frame = original_frame.copy()
     for gx1, gy1, gx2, gy2 in grey_boxes:
@@ -1354,16 +1094,10 @@ def save_annotation_and_overwrite_current():
             motion_ann_frame, (gx1, gy1), (gx2, gy2), (128, 128, 128), -line_thickness
         )
 
-    # Count static vs motion boxes (based on primary class index)
-    static_count = 0
-    motion_count = 0
+    # cross-stream blocking
     for box in boxes:
-        if hierarchical_mode:
-            x1, y1, x2, y2, primary_cls, _, _, _ = box
-        else:
-            x1, y1, x2, y2, primary_cls, _ = box
+        x1, y1, x2, y2, primary_cls = box[0], box[1], box[2], box[3], box[4]
         if primary_cls < len(primary_static_classes):
-            static_count += 1
             if static_blocks_motion == "true":
                 cv2.rectangle(
                     motion_ann_frame,
@@ -1373,7 +1107,6 @@ def save_annotation_and_overwrite_current():
                     -line_thickness,
                 )
         else:
-            motion_count += 1
             if motion_blocks_static == "true":
                 cv2.rectangle(
                     static_ann_frame,
@@ -1383,37 +1116,47 @@ def save_annotation_and_overwrite_current():
                     -line_thickness,
                 )
 
-    # write images (overwrite)
+    # write static image & labels
     if static_img_dir and (static_count > 0 or save_empty_frames == "true"):
+        os.makedirs(static_img_dir, exist_ok=True)
         out_static_img_path = os.path.join(static_img_dir, base + ".jpg")
         cv2.imwrite(out_static_img_path, static_ann_frame)
-        # write static labels
         if static_lbl_dir:
+            os.makedirs(static_lbl_dir, exist_ok=True)
             out_static_lbl = os.path.join(static_lbl_dir, base + ".txt")
             with open(out_static_lbl, "w") as f:
                 for box in boxes:
-                    if hierarchical_mode:
-                        x1, y1, x2, y2, primary_cls, _, _, _ = box
-                    else:
-                        x1, y1, x2, y2, primary_cls, _ = box
+                    x1, y1, x2, y2, primary_cls = (
+                        box[0],
+                        box[1],
+                        box[2],
+                        box[3],
+                        box[4],
+                    )
                     if primary_cls < len(primary_static_classes):
                         xc = (x1 + x2) / 2 / w
                         yc = (y1 + y2) / 2 / h
                         bw = abs(x2 - x1) / w
                         bh = abs(y2 - y1) / h
                         f.write(f"{primary_cls} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
-    # write motion images & labels
+
+    # write motion image & labels
     if motion_img_dir and (motion_count > 0 or save_empty_frames == "true"):
+        os.makedirs(motion_img_dir, exist_ok=True)
         out_motion_img_path = os.path.join(motion_img_dir, base + ".jpg")
         cv2.imwrite(out_motion_img_path, motion_ann_frame)
         if motion_lbl_dir:
+            os.makedirs(motion_lbl_dir, exist_ok=True)
             out_motion_lbl = os.path.join(motion_lbl_dir, base + ".txt")
             with open(out_motion_lbl, "w") as f:
                 for box in boxes:
-                    if hierarchical_mode:
-                        x1, y1, x2, y2, primary_cls, _, _, _ = box
-                    else:
-                        x1, y1, x2, y2, primary_cls, _ = box
+                    x1, y1, x2, y2, primary_cls = (
+                        box[0],
+                        box[1],
+                        box[2],
+                        box[3],
+                        box[4],
+                    )
                     if primary_cls >= len(primary_static_classes):
                         cls_in_file = primary_cls - len(primary_static_classes)
                         xc = (x1 + x2) / 2 / w
@@ -1422,60 +1165,45 @@ def save_annotation_and_overwrite_current():
                         bh = abs(y2 - y1) / h
                         f.write(f"{cls_in_file} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
 
-    # write mask files (to both static & motion mask dirs if both present; prefer existing dirs)
+    # write mask files alongside whichever label dirs we used
     mask_content = ""
     for gx1, gy1, gx2, gy2 in grey_boxes:
         mask_content += f"{gx1} {gy1} {gx2} {gy2}\n"
-    # static mask
-    if static_lbl_dir:
-        static_mask_dir = static_lbl_dir.replace("labels", "masks")
-        os.makedirs(static_mask_dir, exist_ok=True)
-        static_mask_path = os.path.join(static_mask_dir, base + ".mask.txt")
-        with open(static_mask_path, "w") as f:
-            f.write(mask_content)
-    # motion mask
-    if motion_lbl_dir:
-        motion_mask_dir = motion_lbl_dir.replace("labels", "masks")
-        os.makedirs(motion_mask_dir, exist_ok=True)
-        motion_mask_path = os.path.join(motion_mask_dir, base + ".mask.txt")
-        with open(motion_mask_path, "w") as f:
+    for lbl_dir in (static_lbl_dir, motion_lbl_dir):
+        if not lbl_dir:
+            continue
+        mask_dir = lbl_dir.replace("labels", "masks")
+        os.makedirs(mask_dir, exist_ok=True)
+        with open(os.path.join(mask_dir, base + ".mask.txt"), "w") as f:
             f.write(mask_content)
 
-    # ----------------- create/update secondary crop files for current boxes -----------------
-    # When in hierarchical_mode, write cropped images for each box that has a valid secondary index.
+    # ----------------- create/update secondary crop files -----------------
     try:
         if hierarchical_mode:
-            base = item["basename"]  # already in the "<video>_<frame>" format
             created_crops = set()
             for b in boxes:
-                # unpack robustly for both hierarchical and non-hierarchical formats
-                if len(b) >= 6:
-                    x1_b = int(round(b[0]))
-                    y1_b = int(round(b[1]))
-                    x2_b = int(round(b[2]))
-                    y2_b = int(round(b[3]))
-                    primary_idx = int(b[4])
-                    secondary_idx = int(b[5])
-                else:
+                if len(b) < 6:
                     continue
+                x1_b = int(round(b[0]))
+                y1_b = int(round(b[1]))
+                x2_b = int(round(b[2]))
+                y2_b = int(round(b[3]))
+                primary_idx = int(b[4])
+                secondary_idx = int(b[5])
 
-                # skip if secondary not assigned
                 if secondary_idx is None or secondary_idx < 0:
                     continue
-
-                # safety checks for indices
                 if primary_idx < 0 or primary_idx >= len(primary_classes):
                     continue
-                if secondary_idx < 0 or secondary_idx >= len(secondary_classes):
+                if secondary_idx >= len(secondary_classes):
                     continue
 
                 primary_name = primary_classes[primary_idx]
                 secondary_name = secondary_classes[secondary_idx]
 
-                # build expected filename exactly as original annot script used
+                # filename exactly as the annotation script writes it
                 fname = f"{base}_{x1_b}_{y1_b}.jpg"
 
-                # motion crop (if motion_cropped_base_dir exists)
                 if motion_cropped_base_dir:
                     m_dir = os.path.join(
                         motion_cropped_base_dir, primary_name, secondary_name
@@ -1488,10 +1216,8 @@ def save_annotation_and_overwrite_current():
                             cv2.imwrite(m_path, crop)
                             created_crops.add(m_path)
                     except Exception as e:
-                        # best-effort: continue on error
                         print(f"Warning writing motion crop {m_path}: {e}")
 
-                # static crop (if static_cropped_base_dir exists)
                 if static_cropped_base_dir:
                     s_dir = os.path.join(
                         static_cropped_base_dir, primary_name, secondary_name
@@ -1506,9 +1232,7 @@ def save_annotation_and_overwrite_current():
                     except Exception as e:
                         print(f"Warning writing static crop {s_path}: {e}")
 
-            # ensure the item's record of original secondary crops includes newly created files
             orig = item.get("_orig_secondary_crops", set())
-            # normalize to absolute paths (orig stored as absolute earlier)
             orig.update(created_crops)
             item["_orig_secondary_crops"] = orig
     except Exception as e:
@@ -1530,7 +1254,6 @@ class DatasetInspectorTk:
     def __init__(self, root):
         self.root = root
         root.title("BehaveAI — Annotation Inspector")
-        # default larger window so panel visible
         root.geometry("1200x900")
 
         self.main = tk.Frame(root)
@@ -1630,7 +1353,7 @@ class DatasetInspectorTk:
                 self.secondary_buttons.append((btn, color_hex, idx))
                 col += 1
 
-        # bind events to canvas (we convert canvas -> video coords inside handlers)
+        # bind events to canvas (canvas -> video coords converted in handlers)
         self.canvas.bind("<ButtonPress-1>", self.on_mouse_down)
         self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
@@ -1638,8 +1361,6 @@ class DatasetInspectorTk:
         self.canvas.bind("<Motion>", self.on_motion)
 
         root.bind_all("<Key>", self.on_key_all)
-        # ~ root.bind_all('<Left>', lambda e: self.key_step(-1))
-        # ~ root.bind_all('<Right>', lambda e: self.key_step(1))
         root.bind_all("<space>", lambda e: self.toggle_show_mode())
         root.bind_all("<Return>", lambda e: self.key_save())
 
@@ -1732,9 +1453,8 @@ class DatasetInspectorTk:
             self.counter_var.set("")
 
     def canvas_to_video(self, canvas_point):
-        # Map canvas coords (event.x,event.y) -> video pixel coords (vx,vy)
+        # Map canvas coords (event.x, event.y) -> video pixel coords
         cx, cy = canvas_point
-        # compute composite (disp) size in pixels (video area + right column + bottom bar)
         disp_w = video_width + right_frame_width + line_thickness
         disp_h = video_height + bottom_bar_height
         c_w = self.canvas.winfo_width() or 1
@@ -1742,15 +1462,11 @@ class DatasetInspectorTk:
         scale_w = float(c_w) / float(max(1, disp_w))
         scale_h = float(c_h) / float(max(1, disp_h))
         scale = min(scale_w, scale_h) if (scale_w > 0 and scale_h > 0) else 1.0
-        # Top-left anchored, so canvas x,y map to scaled image coords
         display_x = min(max(0, cx), int(round(disp_w * scale)) - 1) / scale
         display_y = min(max(0, cy), int(round(disp_h * scale)) - 1) / scale
-        vx = int(round(display_x * (video_width / float(max(1, video_width)))))
-        vy = int(round(display_y * (video_height / float(max(1, video_height)))))
-        return (vx, vy)
+        return (int(round(display_x)), int(round(display_y)))
 
     def video_to_canvas(self, vx, vy):
-        # map video pixels to canvas coords using current composite scaling
         disp_w = video_width + right_frame_width + line_thickness
         disp_h = video_height + bottom_bar_height
         c_w = self.canvas.winfo_width() or 1
@@ -1758,9 +1474,7 @@ class DatasetInspectorTk:
         scale_w = float(c_w) / float(max(1, disp_w))
         scale_h = float(c_h) / float(max(1, disp_h))
         scale = min(scale_w, scale_h) if (scale_w > 0 and scale_h > 0) else 1.0
-        cx = int(round(vx * (video_width / float(max(1, video_width))) * scale))
-        cy = int(round(vy * (video_height / float(max(1, video_height))) * scale))
-        return (cx, cy)
+        return (int(round(vx * scale)), int(round(vy * scale)))
 
     def on_mouse_down(self, event):
         self.drawing = True
@@ -1768,7 +1482,6 @@ class DatasetInspectorTk:
         self.last_mouse = (event.x, event.y)
         global ix, iy, drawing, cursor_pos
         drawing = True
-        # compute video coords and store
         vx, vy = self.canvas_to_video((event.x, event.y))
         ix, iy = int(vx), int(vy)
         cursor_pos = (ix, iy)
@@ -1831,7 +1544,6 @@ class DatasetInspectorTk:
         global last_mouse_move, cursor_pos
         self.last_mouse = (event.x, event.y)
         last_mouse_move = time.time()
-        # convert canvas coords to video coords and store for zoom/crosshair
         vx, vy = self.canvas_to_video((event.x, event.y))
         cursor_pos = (int(vx), int(vy))
         self.redraw()
@@ -1897,21 +1609,12 @@ class DatasetInspectorTk:
             self.toggle_grey()
             return
         if ks == "Return":
-            save_annotation_and_overwrite_current()
-            boxes.clear()
-            grey_boxes.clear()
-            global current_idx
-            current_idx = min(current_idx + 1, len(items) - 1)
-            load_item(current_idx)
-            self.seek.set(current_idx)
-            self.update_status()
-            self.redraw()
+            self.key_save()
             return
 
         if ks == "Delete":
             print("\nWARNING: This will delete ALL files for this frame!")
             print("Press ENTER to confirm, any other key to cancel...")
-            # Wait for confirmation using a simple key binding approach
             self.root.bind("<Return>", self.confirm_delete)
             self.root.bind("<Escape>", self.cancel_delete)
             self.delete_pending = True
@@ -1919,26 +1622,15 @@ class DatasetInspectorTk:
 
     def confirm_delete(self, event=None):
         if hasattr(self, "delete_pending") and self.delete_pending:
-            # ~ base_filename = f"{video_label}_{frame_number}"
-            # ~ if delete_frame_data(base_filename):
             item = items[current_idx]
             base = item["basename"]
             deleted = annotation_index.delete_frame(base)
             if deleted:
-                # Clear the current display
                 boxes.clear()
                 grey_boxes.clear()
                 print(f"All files for {base} have been deleted")
-                # frame_updated = True
-                try:
-                    # refresh index and redraw ticks immediately
-                    self.refresh_annotation_index_map()
-                    self.draw_seek_ticks()
-                except Exception:
-                    pass
                 self.redraw()
             self.delete_pending = False
-            # Remove the temporary key bindings
             self.root.unbind("<Return>")
             self.root.unbind("<Escape>")
             # Prevent the save function from being called
@@ -1948,10 +1640,8 @@ class DatasetInspectorTk:
         if hasattr(self, "delete_pending") and self.delete_pending:
             print("Deletion cancelled")
             self.delete_pending = False
-            # Remove the temporary key bindings
             self.root.unbind("<Return>")
             self.root.unbind("<Escape>")
-            # Prevent the save function from being called
             return "break"
 
     def key_step(self, delta):
@@ -2001,38 +1691,18 @@ class DatasetInspectorTk:
         scaled_h = max(1, int(round(h * scale)))
         scaled = cv2.resize(disp, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
 
-        # draw crosshair on the *main video area only*
-        try:
-            cx = int(round(cursor_pos[0] * disp_scale_factor))
-            cy = int(round(cursor_pos[1] * disp_scale_factor))
+        # NOTE: the crosshair is drawn by refresh_display(). There used to be a
+        # second copy of that code here, running *after* `scaled` had already
+        # been resized off `disp`, so it never appeared on screen at all.
 
-            # full disp size
-            h_disp, w_disp = disp.shape[:2]
-
-            # main video area size in display pixels
-            main_w = max(1, int(round(video_width * disp_scale_factor)))
-            main_h = max(1, int(round(video_height * disp_scale_factor)))
-
-            # only draw if cursor is inside main video area
-            if 0 <= cx < main_w and 0 <= cy < main_h:
-                cv2.line(
-                    disp, (cx, 0), (cx, main_h), (255, 255, 255), max(1, line_thickness)
-                )
-                cv2.line(
-                    disp, (0, cy), (main_w, cy), (255, 255, 255), max(1, line_thickness)
-                )
-        except Exception:
-            pass
-
-            # determine temporary rectangle to draw (if drawing and no explicit temp_rect provided)
+        # determine temporary rectangle to draw
         if temp_rect is None and getattr(self, "drawing", False):
             if self.start_canvas_xy is not None and self.last_mouse is not None:
                 temp_rect = (self.start_canvas_xy, self.last_mouse)
 
-        # draw temporary rect (coordinates are canvas coords; draw onto scaled image)
+        # draw temporary rect (canvas coords, drawn onto the scaled image)
         if temp_rect is not None:
             (sx, sy), (ex, ey) = temp_rect
-            # clip to scaled image
             rx1 = max(0, min(sx, scaled_w - 1))
             ry1 = max(0, min(sy, scaled_h - 1))
             rx2 = max(0, min(ex, scaled_w - 1))
@@ -2055,7 +1725,6 @@ class DatasetInspectorTk:
         self.update_status()
 
     def loop(self):
-        # lightweight loop: redraw tick (the redraw function already does cheap checks)
         self.redraw()
         self.root.after(30, self.loop)
 

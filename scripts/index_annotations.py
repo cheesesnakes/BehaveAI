@@ -1,6 +1,5 @@
 # index_annotations.py
 # Helper class to list annotated images and load saved labels/masks / find video files.
-# This duplicates the logic used in your inspector verbatim (so behaviour stays identical).
 
 import os
 
@@ -52,52 +51,84 @@ class AnnotationIndex:
         self.ignore_secondary = set(ignore_secondary or [])
 
     # ------------------------------------------------------------------
-    # Build list of annotated images (same behaviour as your inspector)
+    # Build list of annotated images.
+    #
+    # FIX: add_dir used to write every directory it scanned into the SAME
+    # "static_*" keys, guarded by `if "static_img" not in rec`. For a frame
+    # that exists only in the motion dataset that meant static_img,
+    # static_lbl and static_origin_lbl_dir all pointed at MOTION files. The
+    # inspector then filled in motion_lbl from the same directory, so
+    # load_labels_and_masks_for_item read one label file twice — once
+    # unshifted (as static) and once shifted by len(primary_static_classes)
+    # (as motion). Every box appeared twice, and the phantom copy carried a
+    # bogus primary class, so no crop could ever attach to it. That is the
+    # "N/2N box(es) had no matching crop" report.
+    #
+    # Each stream now writes its own namespaced keys, and train wins over val
+    # within a stream (same precedence as before).
     # ------------------------------------------------------------------
+    _EMPTY_ITEM = {
+        "static_img": None,
+        "static_lbl": None,
+        "static_mask": None,
+        "static_origin_img_dir": None,
+        "static_origin_lbl_dir": None,
+        "motion_img": None,
+        "motion_lbl": None,
+        "motion_mask": None,
+        "motion_origin_img_dir": None,
+        "motion_origin_lbl_dir": None,
+    }
+
     def list_images_labels_and_masks(self):
         items = {}
 
-        def add_dir(img_dir, lbl_dir):
-            if not os.path.isdir(img_dir):
+        def add_dir(img_dir, lbl_dir, stream):
+            """Index one image directory into the `stream` ('static'/'motion') keys."""
+            if not img_dir or not os.path.isdir(img_dir):
                 return
             for fname in os.listdir(img_dir):
-                if fname.lower().endswith((".jpg", ".jpeg", ".png")):
-                    base = os.path.splitext(fname)[0]
-                    img_path = os.path.join(img_dir, fname)
-                    lbl_path = (
-                        os.path.join(lbl_dir, base + ".txt")
-                        if os.path.isdir(lbl_dir)
-                        else None
-                    )
-                    mask_dir = lbl_dir.replace("labels", "masks") if lbl_dir else None
-                    mask_path = (
-                        os.path.join(mask_dir, base + ".mask.txt")
-                        if mask_dir and os.path.isdir(mask_dir)
-                        else None
-                    )
-                    rec = items.setdefault(base, {})
-                    if "static_img" not in rec:
-                        rec["static_img"] = img_path
-                        rec["static_lbl"] = (
-                            lbl_path if lbl_path and os.path.exists(lbl_path) else None
-                        )
-                        rec["static_mask"] = (
-                            mask_path
-                            if mask_path and os.path.exists(mask_path)
-                            else None
-                        )
-                        rec["static_origin_img_dir"] = img_dir
-                        rec["static_origin_lbl_dir"] = lbl_dir
+                if not fname.lower().endswith((".jpg", ".jpeg", ".png")):
+                    continue
+                base = os.path.splitext(fname)[0]
+                img_path = os.path.join(img_dir, fname)
+                lbl_path = (
+                    os.path.join(lbl_dir, base + ".txt")
+                    if lbl_dir and os.path.isdir(lbl_dir)
+                    else None
+                )
+                mask_dir = lbl_dir.replace("labels", "masks") if lbl_dir else None
+                mask_path = (
+                    os.path.join(mask_dir, base + ".mask.txt")
+                    if mask_dir and os.path.isdir(mask_dir)
+                    else None
+                )
 
-        add_dir(self.static_train_images_dir, self.static_train_labels_dir)
-        # ---- FIX: pair static_val_images_dir with static_val_labels_dir (was a typo previously) ----
-        add_dir(self.static_val_images_dir, self.static_val_labels_dir)
-        add_dir(self.motion_train_images_dir, self.motion_train_labels_dir)
-        add_dir(self.motion_val_images_dir, self.motion_val_labels_dir)
+                rec = items.setdefault(base, {})
+                if rec.get(stream + "_img"):
+                    # already claimed by the train split for this stream
+                    continue
+                rec[stream + "_img"] = img_path
+                rec[stream + "_lbl"] = (
+                    lbl_path if lbl_path and os.path.exists(lbl_path) else None
+                )
+                rec[stream + "_mask"] = (
+                    mask_path if mask_path and os.path.exists(mask_path) else None
+                )
+                rec[stream + "_origin_img_dir"] = img_dir
+                rec[stream + "_origin_lbl_dir"] = lbl_dir
+
+        add_dir(self.static_train_images_dir, self.static_train_labels_dir, "static")
+        add_dir(self.static_val_images_dir, self.static_val_labels_dir, "static")
+        add_dir(self.motion_train_images_dir, self.motion_train_labels_dir, "motion")
+        add_dir(self.motion_val_images_dir, self.motion_val_labels_dir, "motion")
 
         ordered = []
         for base, rec in sorted(items.items()):
-            ordered.append({"basename": base, **rec})
+            entry = dict(self._EMPTY_ITEM)
+            entry["basename"] = base
+            entry.update(rec)
+            ordered.append(entry)
         return ordered
 
     # ------------------------------------------------------------------
@@ -134,15 +165,28 @@ class AnnotationIndex:
 
     # ------------------------------------------------------------------
     # Load the labels & masks for an item into boxes and grey_boxes lists.
-    # Returns (boxes, grey_boxes) but does NOT yet attach secondary crops.
     # ------------------------------------------------------------------
     def load_labels_and_masks_for_item(self, item, fr, original_frame):
         boxes = []
         grey_boxes = []
-        # base = item.get("basename", "")
+
+        static_lbl = item.get("static_lbl")
+        motion_lbl = item.get("motion_lbl")
+
+        # Belt and braces: if anything upstream ever points both streams at the
+        # same file again, read it once rather than duplicating every box.
+        if (
+            static_lbl
+            and motion_lbl
+            and os.path.abspath(static_lbl) == os.path.abspath(motion_lbl)
+        ):
+            print(
+                f"WARNING: {item.get('basename')} has static_lbl == motion_lbl "
+                f"({static_lbl}); reading it once as motion only."
+            )
+            static_lbl = None
 
         # static labels
-        static_lbl = item.get("static_lbl")
         if static_lbl and os.path.exists(static_lbl):
             try:
                 with open(static_lbl, "r") as f:
@@ -166,8 +210,6 @@ class AnnotationIndex:
                 pass
 
         # motion labels
-        motion_lbl = item.get("motion_lbl")
-        print(motion_lbl)
         if motion_lbl and os.path.exists(motion_lbl):
             try:
                 with open(motion_lbl, "r") as f:
@@ -211,20 +253,13 @@ class AnnotationIndex:
         return boxes, grey_boxes
 
     # ------------------------------------------------------------------
-    # Convenience: load labels by basename (used by annotation script which constructs basename)
-    # It will construct a lightweight "item" dict (checking expected label & mask locations)
-    # and then call load_labels_and_masks_for_item(...)
+    # Convenience: load labels by basename (used by the annotation script,
+    # which constructs the basename itself).
     # ------------------------------------------------------------------
     def load_labels_for_basename(self, base_fn, fr, original_frame):
-        item = {
-            "basename": base_fn,
-            "static_img": None,
-            "motion_img": None,
-            "static_lbl": None,
-            "motion_lbl": None,
-            "static_mask": None,
-            "motion_mask": None,
-        }
+        item = dict(self._EMPTY_ITEM)
+        item["basename"] = base_fn
+
         # static label search
         for d in (self.static_train_labels_dir, self.static_val_labels_dir):
             if d and os.path.isdir(d):
@@ -233,6 +268,9 @@ class AnnotationIndex:
                     item["static_lbl"] = p
                     item["static_origin_lbl_dir"] = d
                     item["static_origin_img_dir"] = d.replace("labels", "images")
+                    img_dir = d.replace("labels", "images")
+                    if os.path.isdir(img_dir):
+                        item["static_img"] = os.path.join(img_dir, base_fn + ".jpg")
                     break
         # motion label search
         for d in (self.motion_train_labels_dir, self.motion_val_labels_dir):
@@ -240,24 +278,24 @@ class AnnotationIndex:
                 p = os.path.join(d, base_fn + ".txt")
                 if os.path.exists(p):
                     item["motion_lbl"] = p
-                    item["motion_img"] = (
-                        os.path.join(d.replace("labels", "images"), base_fn + ".jpg")
-                        if os.path.isdir(d.replace("labels", "images"))
-                        else None
-                    )
                     item["motion_origin_lbl_dir"] = d
+                    img_dir = d.replace("labels", "images")
+                    item["motion_origin_img_dir"] = img_dir
+                    if os.path.isdir(img_dir):
+                        item["motion_img"] = os.path.join(img_dir, base_fn + ".jpg")
                     break
-        # masks
-        for d in (
-            self.static_train_labels_dir,
-            self.static_val_labels_dir,
-            self.motion_train_labels_dir,
-            self.motion_val_labels_dir,
-        ):
+        # masks — keep static and motion separate so they can't be confused
+        for d in (self.static_train_labels_dir, self.static_val_labels_dir):
             if d and os.path.isdir(d):
                 mp = os.path.join(d.replace("labels", "masks"), base_fn + ".mask.txt")
                 if os.path.exists(mp):
                     item["static_mask"] = mp
+                    break
+        for d in (self.motion_train_labels_dir, self.motion_val_labels_dir):
+            if d and os.path.isdir(d):
+                mp = os.path.join(d.replace("labels", "masks"), base_fn + ".mask.txt")
+                if os.path.exists(mp):
+                    item["motion_mask"] = mp
                     break
 
         return self.load_labels_and_masks_for_item(item, fr, original_frame)
@@ -280,11 +318,19 @@ class AnnotationIndex:
             return None
 
     # ------------------------------------------------------------------
-    # Attach secondary crop matches to boxes (in-place semantics via returning a new list)
-    # Implementation follows the inspector behaviour (exact match then small neighbourhood)
+    # Attach secondary crop matches to boxes.
+    # Exact (x1, y1, primary_name) match first, then a small neighbourhood.
     # ------------------------------------------------------------------
     def _attach_secondary_crops(self, item, boxes):
         MATCH_TOL = 2
+
+        def _with_secondary(b, sec_idx):
+            if len(b) >= 8:
+                return (b[0], b[1], b[2], b[3], b[4], sec_idx, b[6], b[7])
+            primary_cls = b[4] if len(b) > 4 else 0
+            conf = b[6] if len(b) > 6 else -1
+            return (b[0], b[1], b[2], b[3], primary_cls, sec_idx, conf, -1)
+
         # build map by (x1, y1, primary_name) -> list of box indices
         box_index = {}
         for bi, b in enumerate(boxes):
@@ -293,13 +339,13 @@ class AnnotationIndex:
             primary_idx = b[4] if len(b) > 4 else None
             primary_name = (
                 self.primary_classes[primary_idx]
-                if primary_idx is not None and primary_idx < len(self.primary_classes)
+                if primary_idx is not None
+                and 0 <= primary_idx < len(self.primary_classes)
                 else None
             )
             key = (bx1, by1, primary_name)
             box_index.setdefault(key, []).append(bi)
 
-        # prepare mapping secondary dir name -> index
         sec_name_to_idx = {name: idx for idx, name in enumerate(self.secondary_classes)}
 
         # parse video_label and frame from basename
@@ -312,6 +358,7 @@ class AnnotationIndex:
         else:
             video_label_guess = item.get("basename", "")
             frame_number_guess = None
+
         # scan both cropped base dirs (motion then static)
         for base_crop_dir in (
             self.motion_cropped_base_dir,
@@ -342,40 +389,17 @@ class AnnotationIndex:
                             or fn_frame != frame_number_guess
                         ):
                             continue
+
+                        matched = False
                         # exact key match first
                         key = (x1_fn, y1_fn, primary_name)
-                        matched = False
                         if key in box_index:
                             for bi in box_index[key]:
-                                b = boxes[bi]
-
-                                if len(b) >= 8:
-                                    boxes[bi] = (
-                                        b[0],
-                                        b[1],
-                                        b[2],
-                                        b[3],
-                                        b[4],
-                                        sec_idx,
-                                        b[6],
-                                        b[7],
-                                    )
-                                else:
-                                    primary_cls = b[4] if len(b) > 4 else 0
-                                    conf = b[6] if len(b) > 6 else -1
-                                    boxes[bi] = (
-                                        b[0],
-                                        b[1],
-                                        b[2],
-                                        b[3],
-                                        primary_cls,
-                                        sec_idx,
-                                        conf,
-                                        -1,
-                                    )
+                                boxes[bi] = _with_secondary(boxes[bi], sec_idx)
                                 matched = True
                         if matched:
                             continue
+
                         # otherwise small neighbourhood search
                         for dx in range(-MATCH_TOL, MATCH_TOL + 1):
                             if matched:
@@ -384,40 +408,14 @@ class AnnotationIndex:
                                 cand = (x1_fn + dx, y1_fn + dy, primary_name)
                                 if cand in box_index:
                                     for bi in box_index[cand]:
-                                        b = boxes[bi]
-                                        if len(b) >= 8:
-                                            boxes[bi] = (
-                                                b[0],
-                                                b[1],
-                                                b[2],
-                                                b[3],
-                                                b[4],
-                                                sec_idx,
-                                                b[6],
-                                                b[7],
-                                            )
-                                        else:
-                                            primary_cls = b[4] if len(b) > 4 else 0
-                                            conf = b[6] if len(b) > 6 else -1
-                                            boxes[bi] = (
-                                                b[0],
-                                                b[1],
-                                                b[2],
-                                                b[3],
-                                                primary_cls,
-                                                sec_idx,
-                                                conf,
-                                                -1,
-                                            )
-                                        matched = True
-                                        break
-                                    if matched:
-                                        break
+                                        boxes[bi] = _with_secondary(boxes[bi], sec_idx)
+                                    matched = True
+                                    break
                             if matched:
                                 break
         return boxes
 
-    # small helper used above (copied behaviour)
+    # small helper used above
     def _norm_to_pixels(self, xc, yc, bw, bh, w, h):
         cx = float(xc) * w
         cy = float(yc) * h
@@ -434,34 +432,26 @@ class AnnotationIndex:
         return x1, y1, x2, y2
 
     # ------------------------------------------------------------------
-    # Delete all saved files for a basename (labels, masks, images, original motion images,
-    # and cropped secondary images when hierarchical_mode is enabled).
-    # Returns list of deleted file paths (empty list if none).
+    # Delete all saved files for a basename (labels, masks, images, original
+    # motion images, and cropped secondary images in hierarchical mode).
+    # Returns the list of deleted file paths.
     # ------------------------------------------------------------------
     def delete_frame(self, base_filename):
-        # ~ def delete_frame(self, base_filename, video_label=None, frame_number=None):
         deleted = []
 
-        # Label directories
         label_dirs = [
             self.static_train_labels_dir,
             self.static_val_labels_dir,
             self.motion_train_labels_dir,
             self.motion_val_labels_dir,
         ]
-
-        # Mask directories are labels -> masks
         mask_dirs = [d.replace("labels", "masks") if d else None for d in label_dirs]
-
-        # Image directories
         image_dirs = [
             self.static_train_images_dir,
             self.static_val_images_dir,
             self.motion_train_images_dir,
             self.motion_val_images_dir,
         ]
-
-        # File extensions to consider for images
         image_exts = (".jpg", ".jpeg", ".png")
 
         # --- delete label files (.txt) ---
@@ -474,7 +464,6 @@ class AnnotationIndex:
                     os.remove(p)
                     deleted.append(p)
                 except Exception:
-                    # intentionally continue on errors
                     pass
 
         # --- delete mask files (.mask.txt) ---
@@ -502,7 +491,7 @@ class AnnotationIndex:
                     except Exception:
                         pass
 
-        # --- delete 'original' motion images if they exist (keeps parity with annot code) ---
+        # --- delete 'original' motion images if they exist ---
         for parent in (self.motion_train_images_dir, self.motion_val_images_dir):
             if not parent:
                 continue
@@ -519,15 +508,10 @@ class AnnotationIndex:
                         pass
 
         # --- delete cropped secondary images when hierarchical_mode is enabled ---
-        # These use filenames like: <video_label>_<frame>_<x1>_<y1>.jpg
-        #
-        # FIX: match on base_filename + "_" and require the remainder to be
-        # exactly <x1>_<y1>. Matching on the bare base_filename let the prefix
-        # run past the frame-number boundary, so deleting frame 105 also removed
-        # the crops for 1050-1059, and deleting frame 10 removed 100-109 and
-        # 1000-1099. Only crops were affected — labels, masks and images are
-        # deleted by exact path above — so the frame kept its boxes and silently
-        # lost its secondary class assignments.
+        # Filenames look like <video_label>_<frame>_<x1>_<y1>.jpg. Match on
+        # base_filename + "_" and require the remainder to be exactly
+        # <x1>_<y1>, so a longer frame number can never be mistaken for a
+        # coordinate (deleting frame 105 used to take out 1050-1059's crops).
         if self.hierarchical_mode and base_filename is not None:
             prefix = f"{base_filename}_"
             for base_cropped_dir in (
@@ -538,14 +522,11 @@ class AnnotationIndex:
                     continue
                 for root, _, files in os.walk(base_cropped_dir):
                     for fname in files:
-                        # quick prefix + ext check
                         lf = fname.lower()
                         if not any(lf.endswith(ext) for ext in image_exts):
                             continue
                         if not fname.startswith(prefix):
                             continue
-                        # the remainder must be exactly <x1>_<y1>, so a longer
-                        # frame number can never be mistaken for a coordinate
                         rest = os.path.splitext(fname)[0][len(prefix) :]
                         bits = rest.split("_")
                         if len(bits) != 2:
