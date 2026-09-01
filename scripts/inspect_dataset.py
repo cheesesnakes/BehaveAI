@@ -2,6 +2,7 @@
 
 import os
 import sys
+import threading
 import time
 import tkinter as tk
 from collections import deque
@@ -442,6 +443,9 @@ ANIM_STILL_THRESHOLD = 0.5
 ANIM_FPS = 8
 last_anim_draw = 0.0
 ANIM_DT = 1.0 / ANIM_FPS
+# How often the UI wakes to *check* whether a repaint is due. Kept short so
+# input still feels immediate; the repaint itself is gated in loop().
+TICK_MS = 15
 
 
 def norm_to_pixels(xc, yc, bw, bh, w, h):
@@ -469,8 +473,332 @@ def build_window_title(basename):
     return " ".join(elements)
 
 
-video_capture = None
 video_frame_index = None
+
+# True once raw_buf holds a real decoded window from the video rather than the
+# placeholder fill of repeated static frames. The redraw loop uses this to
+# decide whether there is an animation worth repainting for.
+raw_buf_is_video = False
+
+
+# ============================================================================
+# Video preview buffer — background worker
+# ----------------------------------------------------------------------------
+# Reading the animation window is the one part of loading an item that has to
+# touch the video file: a seek (which decodes forward from the preceding
+# keyframe) plus a window of decodes. Everything else — images, labels, masks,
+# crops — is cheap. So the frame, its boxes and its masks are shown
+# immediately and the preview window is filled in afterwards by this worker.
+#
+# There is exactly ONE worker thread with a single-slot request queue: a new
+# request replaces any pending one, so scrolling fast doesn't queue up work
+# for frames the user has already left. Each request carries a token; a buffer
+# is only installed if its token is still current, so a slow decode landing
+# late can't overwrite a newer frame's preview.
+#
+# The worker owns its VideoCapture and keeps it open across items from the
+# same clip. Previously every load_item() constructed a fresh VideoCapture and
+# never released it — paying container-open cost on every step through a
+# single video, and leaking a file handle each time.
+# ============================================================================
+
+_video_worker_lock = threading.Lock()
+_video_worker_cv = threading.Condition(_video_worker_lock)
+_video_request = None  # (token, item, ref_frame) — latest request wins
+_video_token = 0
+_video_worker_thread = None
+_repaint_requested = False
+
+# find_video_for_item may hit the filesystem; results never change while we're
+# running, so remember them. Only touched by the worker thread.
+_video_lookup_cache = {}
+
+
+def _find_video_cached(item):
+    key = item["basename"]
+    if key not in _video_lookup_cache:
+        try:
+            _video_lookup_cache[key] = annotation_index.find_video_for_item(item)
+        except Exception:
+            _video_lookup_cache[key] = (None, None)
+    return _video_lookup_cache[key]
+
+
+def _build_preview_buffer(token, item, ref_frame, get_capture):
+    """
+    Decode the animation window for `item` and install it into raw_buf, unless
+    a newer request has superseded this one. Runs on the worker thread.
+    """
+    global raw_buf, raw_buf_is_video, video_frame_index, _repaint_requested
+
+    video_path_found, guessed_frame = _find_video_cached(item)
+    if not video_path_found or not os.path.exists(video_path_found):
+        return
+    if guessed_frame is None:
+        return
+    if token != _video_token:
+        return
+
+    cap, total = get_capture(video_path_found)
+    if cap is None or not cap.isOpened() or total <= 0:
+        return
+
+    base_N = frameWindow
+    step = frame_skip + 1  # sampling interval
+    total_to_read = base_N * step
+
+    def _read_buffer_ending_at(last_frame):
+        """
+        Read frames so the returned buffer holds up to `base_N` frames
+        sampled every `step` frames and *ends* at `last_frame`.
+        Returns (buf, start_frame, last_index).
+        """
+        start_frame = int(last_frame - (base_N - 1) * step)
+        start_frame = max(0, min(start_frame, max(0, total - 1)))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        buf = []
+        read_count = 0
+        idx_r = start_frame
+        while read_count < total_to_read:
+            # Abandon a decode the moment the user has moved on.
+            if token != _video_token:
+                return [], start_frame, start_frame - 1
+            # Only DECODE the frames we actually keep. grab() demuxes the next
+            # frame without decoding it, so the `step - 1` frames we throw
+            # away between samples cost a small fraction of a full read().
+            if (read_count % step) == 0:
+                ret, f = cap.read()
+                if not ret:
+                    break
+                if scale_factor != 1.0:
+                    f = cv2.resize(f, (0, 0), fx=scale_factor, fy=scale_factor)
+                buf.append(f)
+                if len(buf) >= base_N:
+                    last_appended = start_frame + ((len(buf) - 1) * step)
+                    return buf, start_frame, last_appended
+            else:
+                if not cap.grab():
+                    break
+            read_count += 1
+            idx_r += 1
+            if idx_r > total - 1:
+                break
+        if buf:
+            last_appended = start_frame + ((len(buf) - 1) * step)
+        else:
+            last_appended = start_frame - 1
+        return buf, start_frame, last_appended
+
+    def _frame_diff(a, b):
+        try:
+            ga = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            gb = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            return float(np.mean(np.abs(ga - gb)))
+        except Exception:
+            return float("inf")
+
+    # Decide WHICH of guessed_frame-1 / guessed_frame / guessed_frame+1 is the
+    # real last frame of the motion window *before* building any buffer.
+    #
+    # This used to build a complete base_N-frame buffer for each of the three
+    # candidates and then compare their last frames — three seeks plus three
+    # full window decodes to keep one buffer. The candidates are consecutive
+    # frames, so a single seek and three decodes answers the same question.
+    best_last = guessed_frame
+    if ref_frame is not None:
+        lo = max(0, guessed_frame - 1)
+        hi = min(total - 1, guessed_frame + 1)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, lo)
+        best_score = float("inf")
+        for cand_last in range(lo, hi + 1):
+            if token != _video_token:
+                return
+            ret, f = cap.read()
+            if not ret:
+                break
+            if scale_factor != 1.0:
+                f = cv2.resize(f, (0, 0), fx=scale_factor, fy=scale_factor)
+            # compare against the static frame, because basenames store the
+            # *last* frame of the motion window.
+            score = _frame_diff(f, ref_frame)
+            if score < best_score:
+                best_score = score
+                best_last = cand_last
+
+    best_last = max(0, min(int(best_last), max(0, total - 1)))
+    best_buf, _start_used, last_idx = _read_buffer_ending_at(best_last)
+    if not best_buf:
+        return
+
+    # Install by REBINDING raw_buf rather than clear()+append(), so the UI
+    # thread never sees a half-empty deque mid-swap. Readers take one
+    # reference and work from that.
+    with _video_worker_cv:
+        if token != _video_token:
+            return
+        raw_buf = deque(best_buf, maxlen=base_N)
+        raw_buf_is_video = len(best_buf) == base_N
+        video_frame_index = last_idx
+        _repaint_requested = True
+
+
+def _video_worker_loop():
+    """Serve the newest pending preview request, forever."""
+    global _video_request
+
+    cache = {"path": None, "cap": None, "total": 0}
+
+    def get_capture(path):
+        """Reuse the open capture when we're still inside the same clip."""
+        if (
+            cache["path"] == path
+            and cache["cap"] is not None
+            and cache["cap"].isOpened()
+        ):
+            return cache["cap"], cache["total"]
+        if cache["cap"] is not None:
+            try:
+                cache["cap"].release()
+            except Exception:
+                pass
+        cap = cv2.VideoCapture(path)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else 0
+        cache.update(path=path, cap=cap, total=total)
+        return cap, total
+
+    while True:
+        with _video_worker_cv:
+            while _video_request is None:
+                _video_worker_cv.wait()
+            token, item, ref_frame = _video_request
+            _video_request = None
+        try:
+            _build_preview_buffer(token, item, ref_frame, get_capture)
+        except Exception as e:
+            print(f"Warning building video preview: {e}")
+
+
+def _request_preview_buffer(item, ref_frame):
+    """Ask the worker for this item's preview window, superseding any pending one."""
+    global _video_request, _video_token, _video_worker_thread
+
+    if _video_worker_thread is None:
+        _video_worker_thread = threading.Thread(
+            target=_video_worker_loop, name="preview-buffer", daemon=True
+        )
+        _video_worker_thread.start()
+
+    with _video_worker_cv:
+        _video_token += 1
+        _video_request = (_video_token, item, ref_frame)
+        _video_worker_cv.notify()
+
+
+# ============================================================================
+# Secondary-crop index
+# ----------------------------------------------------------------------------
+# collect_secondary_crops_for_item used to listdir the entire
+# annot_*_crop/<primary>/<secondary>/ tree on every single frame load, parsing
+# every filename in the project to find the handful belonging to one frame —
+# O(total crops) per navigation step, and one of the two things that made
+# stepping to the next frame take seconds.
+#
+# Instead we build the mapping (video_label, frame_num) -> {crop paths} once,
+# lazily on first use, and keep it in step as crops are written or frames are
+# deleted. Lookups are then O(1).
+#
+# The index is authoritative only for crops written through this process. If
+# another tool writes crops into the tree while the inspector is open, call
+# invalidate_crop_index() (or restart) to pick them up.
+# ============================================================================
+
+_crop_index = None
+
+
+def _parse_crop_filename(fn):
+    """
+    Crops are named `<video>_<frame>_<x1>_<y1>.jpg` (video label may itself
+    contain underscores). Return (video_label, frame_num), or None if the
+    name doesn't match the convention.
+    """
+    if not fn.lower().endswith((".jpg", ".jpeg", ".png")):
+        return None
+    parts = os.path.splitext(fn)[0].split("_")
+    if len(parts) < 4:
+        return None
+    try:
+        int(parts[-1])  # y1
+        int(parts[-2])  # x1
+        frame_num = int(parts[-3])
+    except ValueError:
+        return None
+    return "_".join(parts[:-3]), frame_num
+
+
+def _crop_key_for_basename(base):
+    """Split an annotation basename `<video>_<frame>` into (video, frame)."""
+    if "_" not in base:
+        return None
+    video_label_part, tail = base.rsplit("_", 1)
+    try:
+        return video_label_part, int(tail)
+    except ValueError:
+        return None
+
+
+def _build_crop_index():
+    """Walk both crop trees once and bucket every crop by (video, frame)."""
+    t0 = time.time()
+    idx = {}
+    n_files = 0
+    for base_crop_dir in (motion_cropped_base_dir, static_cropped_base_dir):
+        if not base_crop_dir or not os.path.isdir(base_crop_dir):
+            continue
+        for root_dir, _dirs, files in os.walk(base_crop_dir):
+            for fn in files:
+                key = _parse_crop_filename(fn)
+                if key is None:
+                    continue
+                idx.setdefault(key, set()).add(os.path.join(root_dir, fn))
+                n_files += 1
+    print(
+        f"Indexed {n_files} secondary crop file(s) across {len(idx)} frame(s) "
+        f"in {time.time() - t0:.2f}s"
+    )
+    return idx
+
+
+def _get_crop_index():
+    global _crop_index
+    if _crop_index is None:
+        _crop_index = _build_crop_index()
+    return _crop_index
+
+
+def invalidate_crop_index():
+    """Force a rebuild on next lookup (e.g. after an external tool wrote crops)."""
+    global _crop_index
+    _crop_index = None
+
+
+def _crop_index_add(paths):
+    """Record crops this process just wrote, so the index stays accurate."""
+    if _crop_index is None:
+        return
+    for p in paths:
+        key = _parse_crop_filename(os.path.basename(p))
+        if key is None:
+            continue
+        _crop_index.setdefault(key, set()).add(p)
+
+
+def _crop_index_drop(base):
+    """Forget every crop belonging to a frame whose files were just deleted."""
+    if _crop_index is None:
+        return
+    key = _crop_key_for_basename(base)
+    if key is not None:
+        _crop_index.pop(key, None)
 
 
 def collect_secondary_crops_for_item(item):
@@ -479,49 +807,10 @@ def collect_secondary_crops_for_item(item):
     this item's video/frame. Stored on the item so save() can tell which
     crops it is replacing.
     """
-    orig_crops = set()
-    base = item["basename"]
-    if "_" in base:
-        video_label_part, tail = base.rsplit("_", 1)
-        try:
-            frame_num = int(tail)
-        except Exception:
-            frame_num = None
-    else:
-        video_label_part = base
-        frame_num = None
-
-    for base_crop_dir in (motion_cropped_base_dir, static_cropped_base_dir):
-        if not base_crop_dir or not os.path.isdir(base_crop_dir):
-            continue
-        for primary_name in os.listdir(base_crop_dir):
-            primary_dir = os.path.join(base_crop_dir, primary_name)
-            if not os.path.isdir(primary_dir):
-                continue
-            for secondary_name in os.listdir(primary_dir):
-                sec_dir = os.path.join(primary_dir, secondary_name)
-                if not os.path.isdir(sec_dir):
-                    continue
-                for fn in os.listdir(sec_dir):
-                    if not fn.lower().endswith((".jpg", ".jpeg", ".png")):
-                        continue
-                    stem = os.path.splitext(fn)[0]
-                    parts = stem.split("_")
-                    if len(parts) < 4:
-                        continue
-                    try:
-                        int(parts[-1])  # y1
-                        int(parts[-2])  # x1
-                        frame_fn = int(parts[-3])
-                        video_label_part_fn = "_".join(parts[:-3])
-                    except Exception:
-                        continue
-                    if (
-                        video_label_part_fn == video_label_part
-                        and frame_fn == frame_num
-                    ):
-                        orig_crops.add(os.path.join(sec_dir, fn))
-    return orig_crops
+    key = _crop_key_for_basename(item["basename"])
+    if key is None:
+        return set()
+    return set(_get_crop_index().get(key, ()))
 
 
 def load_item(idx):
@@ -532,14 +821,13 @@ def load_item(idx):
         boxes, \
         grey_boxes, \
         raw_buf, \
+        raw_buf_is_video, \
         video_label, \
-        video_capture, \
         video_frame_index, \
         video_height, \
         video_width
     boxes = []
     grey_boxes = []
-    raw_buf.clear()
 
     # FIX: this used to load labels for items[current_idx] regardless of the
     # idx it was asked for, so a caller that hadn't already updated
@@ -596,9 +884,12 @@ def load_item(idx):
 
     # set video dims from loaded images (affects layout)
     video_height, video_width = original_frame.shape[:2]
-    # refill raw_buf with static frame repeated (until we try video)
-    for _ in range(raw_buf.maxlen):
-        raw_buf.append(fr.copy())
+    # Placeholder fill: the static frame repeated, so the animation widget
+    # shows something sensible until the worker delivers the real window.
+    # Rebound rather than cleared in place, since the UI thread may be reading
+    # it concurrently.
+    raw_buf = deque((fr for _ in range(frameWindow)), maxlen=frameWindow)
+    raw_buf_is_video = False
 
     # Load labels and masks. AnnotationIndex.load_labels_and_masks_for_item
     # already attaches the secondary crops, so there is no second pass here —
@@ -608,7 +899,8 @@ def load_item(idx):
     )
 
     # Record which secondary crop files exist right now, so save() can detect
-    # deletions later.
+    # deletions later. Backed by the in-memory crop index (see above), so this
+    # is a dict lookup rather than a walk of the whole crop tree.
     orig_crops = collect_secondary_crops_for_item(item)
     item["_orig_secondary_crops"] = orig_crops
 
@@ -640,105 +932,11 @@ def load_item(idx):
             )
     # ----------------- END report -----------------
 
-    # try to find and load video preview frames
-    video_path_found, guessed_frame = annotation_index.find_video_for_item(item)
-    video_capture = None
-    video_frame_index = guessed_frame
-    if video_path_found and os.path.exists(video_path_found):
-        try:
-            video_capture = cv2.VideoCapture(video_path_found)
-
-            # If guessed_frame is known and capture opened, build a buffer of
-            # base_N frames that *ends* at guessed_frame.
-            if guessed_frame is not None and video_capture.isOpened():
-                total = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
-                base_N = raw_buf.maxlen  # frameWindow_base
-                step = frame_skip + 1  # sampling interval
-                total_to_read = base_N * step
-
-                def _read_buffer_ending_at(last_frame):
-                    """
-                    Read frames so the returned buffer holds up to `base_N`
-                    frames sampled every `step` frames and *ends* at
-                    `last_frame`. Returns (buf, start_frame, last_index).
-                    """
-                    start_frame = int(last_frame - (base_N - 1) * step)
-                    start_frame = max(0, min(start_frame, max(0, total - 1)))
-                    video_capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-                    buf = []
-                    read_count = 0
-                    idx_r = start_frame
-                    while read_count < total_to_read:
-                        ret, f = video_capture.read()
-                        if not ret:
-                            break
-                        if (read_count % step) == 0:
-                            if scale_factor != 1.0:
-                                f = cv2.resize(
-                                    f, (0, 0), fx=scale_factor, fy=scale_factor
-                                )
-                            buf.append(f.copy())
-                            if len(buf) >= base_N:
-                                last_appended = start_frame + ((len(buf) - 1) * step)
-                                return buf, start_frame, last_appended
-                        read_count += 1
-                        idx_r += 1
-                        if idx_r > total - 1:
-                            break
-                    if buf:
-                        last_appended = start_frame + ((len(buf) - 1) * step)
-                    else:
-                        last_appended = start_frame - 1
-                    return buf, start_frame, last_appended
-
-                candidates = [guessed_frame - 1, guessed_frame, guessed_frame + 1]
-                best_buf = None
-                best_last = None
-                best_score = float("inf")
-
-                def _frame_diff(a, b):
-                    try:
-                        ga = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                        gb = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                        return float(np.mean(np.abs(ga - gb)))
-                    except Exception:
-                        return float("inf")
-
-                for cand_last in candidates:
-                    if cand_last < 0 or cand_last > total - 1:
-                        continue
-                    buf, s, last_idx = _read_buffer_ending_at(cand_last)
-                    if not buf:
-                        continue
-                    # compare the LAST buffer frame to fr, because basenames
-                    # store the *last* frame of the motion window.
-                    if fr is not None:
-                        score = _frame_diff(buf[-1], fr)
-                    else:
-                        score = 0.0
-                    if score < best_score:
-                        best_score = score
-                        best_buf = buf
-                        best_last = last_idx
-
-                # fallback: try guessed_frame directly if none chosen.
-                # FIX: this used to unpack three values into two names, which
-                # raised ValueError and dropped straight into the except below,
-                # silently killing the video preview instead of using it.
-                if best_buf is None:
-                    buf, s, last_idx = _read_buffer_ending_at(guessed_frame)
-                    if buf:
-                        best_buf = buf
-                        best_last = last_idx
-
-                if best_buf is not None:
-                    raw_buf.clear()
-                    for f in best_buf:
-                        raw_buf.append(f)
-                    video_frame_index = best_last
-
-        except Exception:
-            video_capture = None
+    # Hand the video preview window to the background worker and return. The
+    # frame, boxes and masks are already usable; the animation widget fills in
+    # a moment later. This used to block here on a seek plus a window of
+    # decodes before the UI saw anything at all.
+    _request_preview_buffer(item, fr)
 
 
 # load first item synchronously so UI has initial data
@@ -949,10 +1147,14 @@ def draw_zoom(disp, cursor_pos_in):
         cv2.rectangle(z_mid, (0, 0), (widget_size - 1, widget_size - 1), (0, 0, 0), 1)
 
     # --- bottom zoom (animation, 1x) ---
+    # Take one reference to the buffer: the preview worker installs a new one
+    # by rebinding the global, so anything we read from `buf` stays consistent
+    # for the whole of this draw.
+    buf = raw_buf
     z_bot = None
-    if len(raw_buf) == raw_buf.maxlen and len(raw_buf) > 0:
-        idx = int(((time.time() - last_mouse_move) * ANIM_FPS) % raw_buf.maxlen)
-        small = raw_buf[idx]
+    if len(buf) == buf.maxlen and len(buf) > 0:
+        idx = int(((time.time() - last_mouse_move) * ANIM_FPS) % buf.maxlen)
+        small = buf[idx]
         small_crop, crop_box = padded_crop(small, cx, cy, crop_vid_anim)
         z_bot = cv2.resize(
             small_crop, (widget_size, widget_size), interpolation=cv2.INTER_LINEAR
@@ -1041,6 +1243,10 @@ def save_annotation_and_overwrite_current():
     deleted = annotation_index.delete_frame(base)
     if deleted:
         print("Overwriting existing annotation")
+    # delete_frame removes this frame's crops from disk; drop them from the
+    # index too so it doesn't hand back paths that no longer exist. The crops
+    # written further down re-register themselves.
+    _crop_index_drop(base)
 
     h, w = original_frame.shape[:2]
 
@@ -1232,6 +1438,11 @@ def save_annotation_and_overwrite_current():
                     except Exception as e:
                         print(f"Warning writing static crop {s_path}: {e}")
 
+            # Keep the in-memory crop index in step with what we just wrote,
+            # so a later visit to this frame sees these crops without a
+            # rebuild.
+            _crop_index_add(created_crops)
+
             orig = item.get("_orig_secondary_crops", set())
             orig.update(created_crops)
             item["_orig_secondary_crops"] = orig
@@ -1371,11 +1582,15 @@ class DatasetInspectorTk:
         self.start_canvas_xy = None
         self.composite_scale = 1.0
 
+        # redraw bookkeeping — see loop()
+        self._dirty = True
+        self._last_draw = 0.0
+
         self.seek.set(current_idx)
         self.update_status()
         self.update_button_states()
 
-        self.root.after(30, self.loop)
+        self.root.after(TICK_MS, self.loop)
 
     def select_primary(self, class_idx):
         global active_primary, grey_mode, show_mode
@@ -1440,6 +1655,8 @@ class DatasetInspectorTk:
             frame_updated = True
             self.update_status()
             self.seek.set(current_idx)
+            # the gated loop() won't repaint on its own for a still frame
+            self.mark_dirty()
 
     def update_status(self):
         try:
@@ -1628,6 +1845,9 @@ class DatasetInspectorTk:
             if deleted:
                 boxes.clear()
                 grey_boxes.clear()
+                # keep the crop index from handing back paths that are gone
+                _crop_index_drop(base)
+                item["_orig_secondary_crops"] = set()
                 print(f"All files for {base} have been deleted")
                 self.redraw()
             self.delete_pending = False
@@ -1723,10 +1943,38 @@ class DatasetInspectorTk:
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, image=self.tk_img, anchor="nw")
         self.update_status()
+        self._dirty = False
+        self._last_draw = time.time()
+
+    def mark_dirty(self):
+        """Request a repaint on the next tick (safe to call from any thread)."""
+        self._dirty = True
 
     def loop(self):
-        self.redraw()
-        self.root.after(30, self.loop)
+        """
+        Repaint only when there is a reason to.
+
+        This used to run the whole pipeline — composite, draw, resize, convert
+        to PhotoImage — every 30 ms unconditionally, at roughly 33 fps. But the
+        animation index only advances at ANIM_FPS (8), so three quarters of
+        those frames produced a pixel-identical image; and while the buffer is
+        still the placeholder fill (repeated static frame) the animation isn't
+        moving at all, so none of them were needed.
+        """
+        global _repaint_requested
+
+        now = time.time()
+        if _repaint_requested:
+            _repaint_requested = False
+            self._dirty = True
+
+        if self._dirty:
+            self.redraw()
+        elif raw_buf_is_video and (now - self._last_draw) >= ANIM_DT:
+            # a real decoded window is loaded, so the animation is live
+            self.redraw()
+
+        self.root.after(TICK_MS, self.loop)
 
 
 # Launch
