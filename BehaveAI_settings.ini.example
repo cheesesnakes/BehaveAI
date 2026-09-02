@@ -1,0 +1,117 @@
+; ---------------------------------------------------------------------------
+; Example configuration for a fish behaviour analysis pipeline
+; ---------------------------------------------------------------------------
+
+[DEFAULT]
+; ---------- Core class definitions ----------
+; Primary (detection) classes and their hotkeys / display colours
+primary_motion_classes   = fish
+primary_motion_hotkeys   = 1
+primary_motion_colors    = 0,220,255
+
+; Secondary (behaviour) classes – hotkeys and colours must match order
+secondary_motion_classes   = moving,vigilance,scanning,bite,chase,escape
+secondary_motion_hotkeys   = 2,3,4,5,6,7
+secondary_motion_colors    = 0,255,97;236,255,0;255,188,0;255,97,97;255,62,190;200,200,200
+
+; Static (species) classification – 0 means “none”
+primary_static_classes     = fish
+primary_static_hotkeys     = 8
+primary_static_colors      = 200,200,200
+secondary_static_classes   = 0
+secondary_static_hotkeys   = 0
+secondary_static_colors    = 0
+
+ignore_secondary =          ; (optional) list of classes to ignore
+
+; ---------- File system ----------
+clips_dir   = /path/to/clips
+input_dir   = /path/to/input/videos
+output_dir  = /path/to/output/results
+
+; ---------- Processing flags ----------
+motion_blocks_static = false
+static_blocks_motion = false
+save_empty_frames    = true
+dominant_source      = confidence   ; confidence | detection | motion
+scale_factor         = 1.0
+line_thickness       = 1
+font_size            = 0.6
+
+; ---------- Validation split ----------
+val_frequency = 0.2
+
+; ---------- Motion‑colour encoding ----------
+strategy             = exponential   ; exponential | sequential
+chromatic_tail_only  = false
+expA                 = 0.67          ; green buffer retention
+expB                 = 0.86          ; red buffer retention
+lum_weight           = 0.3
+rgb_multipliers      = 4,4,4         ; red,green,blue gain
+motion_threshold     = 0
+frame_skip           = 1             ; process every (skip+1)th raw frame
+
+; ---------- Models & training ----------
+primary_classifier            = yolo26m.pt
+primary_epochs                = 300
+primary_imgsz                 = 1280
+secondary_classifier          = yolo26s-cls.pt
+secondary_epochs              = 300
+secondary_imgsz               = 320
+use_ncnn                      = false
+inference_imgsz               = 1280
+train_batch                   = 16
+train_device                  = 0
+primary_conf_thresh           = 0.25
+secondary_conf_thresh         = 0.25
+primary_static_external_model = /path/to/species_model.pt
+secondary_static_external_model = /path/to/behaviour_model.pt
+primary_static_pseudo_labeling = false
+
+; ---------- Detection merging & tracking ----------
+centroid_merge_thresh = 100
+iou_thresh            = 0.5
+match_distance_thresh = 100
+delete_after_missed   = 5
+
+; ---------- Secondary classifier data staging ----------
+secondary_val_fraction       = 0.2
+secondary_split_seed         = 0
+secondary_ignore_subclasses  = chase,escape
+secondary_video_regex        = ^(.*?)(?:_id\d+|_frame\d+|_track\d+)
+secondary_sampler_power      = 0.5
+secondary_crop_margin        = 0.0
+
+; ---------- (Some settings repeated – keep consistent) ----------
+centroid_merge_thresh = 50
+iou_thresh            = 0.4
+match_distance_thresh = 100
+delete_after_missed   = 5
+
+; ---------------------------------------------------------------------------
+; [tracker] – settings for the tracking backend (BoxMOT)
+; ---------------------------------------------------------------------------
+[tracker]
+tracker_type     = ocsort        ; ocsort | bytetrack | botsort | …
+det_conf_floor   = 0.05          ; confidence used to run the detector
+det_thresh       = 0.15          ; tracker’s own high/low confidence split
+max_age          = 45            ; frames to keep a track without a match
+min_hits         = 2             ; minimum detections to output a track
+iou_threshold    = 0.20          ; association IoU gate (looser for fish)
+per_class        = false
+device           = cuda:0
+half             = false
+reid_weights     = osnet_x0_25_msmt17.pt   ; only for ReID‑based trackers
+velocity_window  = 5
+strict_kwargs    = true
+verbose          = true
+
+; ---------------------------------------------------------------------------
+; [kalman] – settings for the built‑in (non‑BoxMOT) tracker
+; ---------------------------------------------------------------------------
+[kalman]
+process_noise_pos   = 0.01
+process_noise_vel   = 0.1
+measurement_noise   = 0.5
+tracker_iou_weight  = 0.4
+tracker_class_penalty = 2.0
