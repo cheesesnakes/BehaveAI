@@ -96,7 +96,7 @@ params = load_params()
 
 # Image extensions recognised when counting dataset contents.
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
-
+PATIENCE = 20
 
 # ============================================================================
 # STAGE 0 — Training hyperparameters, split by task
@@ -953,7 +953,7 @@ def maybe_retrain(
                 exist_ok=True,
                 # --- Core Training ---
                 device=params["train_device"],
-                patience=60,
+                patience=PATIENCE,
                 # --- Task-specific optimizer / augmentation / loss block ---
                 **extra,
             )
@@ -1001,7 +1001,7 @@ def maybe_retrain(
             exist_ok=True,
             # --- Core Training ---
             device=params["train_device"],
-            patience=60,
+            patience=PATIENCE,
             # --- Task-specific optimizer / augmentation / loss block ---
             **extra,
         )
