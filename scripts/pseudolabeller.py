@@ -418,9 +418,10 @@ def generate_backgrounds(params, args):
     This function is called from pseudo_label() and causes an immediate exit
     after completion, making it act as a separate sub‑command.
     """
+    import random
+
     import cv2
     import numpy as np
-    import random
 
     target_per_video = args.generate_backgrounds
     if target_per_video <= 0:
@@ -545,9 +546,11 @@ def generate_backgrounds(params, args):
         start_positions = sorted(set(start_positions))
 
         for start in start_positions:
-            # Seek to start
             cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-            frames_buffer = []
+            raw_buffer = []
+            motion_buffer = []
+            prev_frames = None  # motion history
+
             for _ in range(window):
                 ret, frame = cap.read()
                 if not ret:
@@ -559,11 +562,26 @@ def generate_backgrounds(params, args):
                         fx=params["scale_factor"],
                         fy=params["scale_factor"],
                     )
-                frames_buffer.append(frame)
-            if len(frames_buffer) < window:
-                continue  # should not happen if start <= max_start
+                raw_buffer.append(frame)
 
-            median_img = np.median(frames_buffer, axis=0).astype(np.uint8)
+                # ---- Build motion image for this frame ----
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                if prev_frames is None:
+                    prev_frames = new_history(gray)
+                    continue
+                motion_img = create_motion_image(prev_frames, gray, params)
+                motion_buffer.append(motion_img)
+
+            if len(raw_buffer) < window:
+                continue
+            if do_motion and len(motion_buffer) < window - 1:
+                continue
+
+            # Median of raw frames (for static)
+            median_raw = np.median(raw_buffer, axis=0).astype(np.uint8)
+
+            # Median of motion images (for motion) – motion images are grayscale, so axis is (H, W)
+            median_motion = np.median(motion_buffer, axis=0).astype(np.uint8)
 
             # Train/val assignment
             is_val = rng.random() < val_freq
@@ -575,7 +593,7 @@ def generate_backgrounds(params, args):
                 img_dir = static_dirs[2] if is_val else static_dirs[0]
                 lbl_dir = static_dirs[3] if is_val else static_dirs[1]
                 if not args.dry_run:
-                    cv2.imwrite(os.path.join(img_dir, f"{base}.jpg"), median_img)
+                    cv2.imwrite(os.path.join(img_dir, f"{base}.jpg"), median_raw)
                     with open(os.path.join(lbl_dir, f"{base}.txt"), "w") as f:
                         pass  # empty -> background
                 total_bg_written += 1
@@ -585,7 +603,7 @@ def generate_backgrounds(params, args):
                 img_dir = motion_dirs[2] if is_val else motion_dirs[0]
                 lbl_dir = motion_dirs[3] if is_val else motion_dirs[1]
                 if not args.dry_run:
-                    cv2.imwrite(os.path.join(img_dir, f"{base}.jpg"), median_img)
+                    cv2.imwrite(os.path.join(img_dir, f"{base}.jpg"), median_motion)
                     with open(os.path.join(lbl_dir, f"{base}.txt"), "w") as f:
                         pass
                 total_bg_written += 1
@@ -938,7 +956,7 @@ def main():
     ap.add_argument(
         "--bg-window",
         type=int,
-        default=30,
+        default=60,
         help="Number of consecutive frames to median over (default: 30).",
     )
     ap.add_argument(
