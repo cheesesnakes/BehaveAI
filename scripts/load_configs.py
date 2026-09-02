@@ -1,5 +1,6 @@
 import configparser
 import os
+import re
 import sys
 import tkinter as tk
 from tkinter import filedialog
@@ -55,6 +56,26 @@ TWO_STAGE_TRACKERS = {
     "sfsort",
 }
 
+# ---------- Secondary-classifier defaults ---------------------------------
+# The secondary crop tree is stored FLAT:
+#
+#     annot_motion_crop/<primary_class>/<subclass>/*.jpg
+#
+# classify_track.stage_split_dataset() builds a train/val view of it inside
+# the model directory at training time. These keys steer that. Everything
+# here has a working default, so an INI that predates them still loads.
+
+# Everything in a crop filename before the first _id / _frame / _track marker
+# is treated as the source video. Whole videos go to one side of the split, so
+# near-duplicate frames from the same track cannot straddle train and val.
+DEFAULT_VIDEO_REGEX = r"^(.*?)(?:_id\d+|_frame\d+|_track\d+)"
+
+# Exponent on inverse class frequency for the training sampler.
+#   0.0 -> off (natural frequencies)
+#   0.5 -> sqrt-inverse (default)
+#   1.0 -> full inverse; usually overfits the rarest class
+DEFAULT_SAMPLER_POWER = 0.5
+
 
 def _cfg_bool(value, fallback=False):
     """INI booleans, tolerant of the true/yes/1/on family."""
@@ -63,6 +84,13 @@ def _cfg_bool(value, fallback=False):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _cfg_list(value):
+    """Comma-separated INI value -> list of non-empty stripped strings."""
+    if value is None:
+        return []
+    return [item.strip() for item in str(value).split(",") if item.strip()]
 
 
 def read_tracker_params(config):
@@ -156,7 +184,12 @@ def set_project_directory(config_path):
 
 def load_configs(config_path):
     # Load configuration
-    config = configparser.ConfigParser()
+    #
+    # interpolation=None: BasicInterpolation treats '%' as a reference marker,
+    # so a regex or format string containing '%' in the INI would raise at
+    # read time. secondary_video_regex is a regex, so interpolation is off.
+    # Nothing in this project used %(name)s substitution.
+    config = configparser.ConfigParser(interpolation=None)
     config.optionxform = str  # keep case
     config.read(config_path)
     return config
@@ -343,6 +376,21 @@ def read_parameters():
         else:
             params["hierarchical_mode"] = False
 
+        # NOTE ON DUPLICATES IN primary_classes
+        # -------------------------------------
+        # These are concatenations, not unions. When the same name appears in
+        # both primary_static_classes and primary_motion_classes — which is
+        # the normal case for a single-species project, e.g. "fish" detected
+        # on both streams — primary_classes legitimately contains it twice,
+        # and primary_colors / primary_hotkeys stay aligned with it index for
+        # index. That alignment is why the duplicate is NOT removed here.
+        #
+        # Callers that iterate primary_classes to do per-class WORK (training
+        # a secondary model, building a crop directory) must deduplicate
+        # first — `dict.fromkeys(...)` preserves order — or they will do the
+        # same work twice. classify_track.train_models() does exactly that.
+        # Callers that index into the parallel colour/hotkey lists should keep
+        # using the raw list.
         params["primary_classes"] = (
             params["primary_static_classes"] + params["primary_motion_classes"]
         )
@@ -394,9 +442,13 @@ def read_parameters():
             or params["primary_static_pseudo_labeling"]
         )
 
-        params["ignore_secondary"] = [
-            name.strip() for name in config["DEFAULT"]["ignore_secondary"].split(",")
-        ]
+        # PRIMARY classes for which no secondary classifier is trained or run.
+        # Empty entries are dropped: "ignore_secondary = " used to yield [""],
+        # a list containing one empty string, which is truthy-looking and
+        # matched nothing.
+        params["ignore_secondary"] = _cfg_list(
+            config["DEFAULT"].get("ignore_secondary", "")
+        )
         params["dominant_source"] = config["DEFAULT"]["dominant_source"].lower()
 
         params["primary_classifier"] = config["DEFAULT"].get(
@@ -546,6 +598,65 @@ def read_parameters():
 
         params["val_frequency"] = float(config["DEFAULT"].get("val_frequency", "0.2"))
 
+        # ================================================================
+        # Secondary classifier: split staging, class balancing, cropping
+        # ----------------------------------------------------------------
+        # Read unconditionally (not only under hierarchical_mode) so
+        # params.get() never has to guess and validation always runs.
+        # ================================================================
+
+        # Fraction of each subclass held out for validation when
+        # classify_track stages the split. Defaults to val_frequency so a
+        # project that already tuned that gets consistent behaviour, but it
+        # is a SEPARATE knob: val_frequency governs which annotated FRAMES
+        # the annotation tool holds out for the primary detectors, this one
+        # governs the secondary crop tree.
+        params["secondary_val_fraction"] = float(
+            config["DEFAULT"].get(
+                "secondary_val_fraction", str(params["val_frequency"])
+            )
+        )
+
+        # Seed for the split. Fixed by default so re-running training does
+        # not silently reshuffle train and val underneath you — a moving
+        # split makes two runs incomparable.
+        params["secondary_split_seed"] = int(
+            config["DEFAULT"].get("secondary_split_seed", "0")
+        )
+
+        # SUBCLASS names excluded from secondary training entirely. Distinct
+        # from ignore_secondary, which names PRIMARY classes. Use this for
+        # behaviours annotated too rarely to learn or evaluate; they stay in
+        # secondary_motion_classes so the annotation tool keeps its hotkeys.
+        # Subclasses too small to split are dropped automatically regardless.
+        params["secondary_ignore_subclasses"] = _cfg_list(
+            config["DEFAULT"].get("secondary_ignore_subclasses", "")
+        )
+
+        # Regex whose first capture group is the source video of a crop.
+        # Whole videos are assigned to one side of the split, so consecutive
+        # near-duplicate frames cannot appear in both train and val — which
+        # would inflate validation accuracy badly. If this matches nothing,
+        # the staging code says so and falls back to a per-image split.
+        params["secondary_video_regex"] = config["DEFAULT"].get(
+            "secondary_video_regex", DEFAULT_VIDEO_REGEX
+        )
+
+        # Exponent on inverse class frequency for the training sampler. See
+        # DEFAULT_SAMPLER_POWER above. 0 disables balancing.
+        params["secondary_sampler_power"] = float(
+            config["DEFAULT"].get("secondary_sampler_power", str(DEFAULT_SAMPLER_POWER))
+        )
+
+        # Fraction of its own width/height a detection box is expanded by
+        # before the secondary crop is taken. MUST match whatever was used to
+        # generate the training crops — train-time and inference-time framing
+        # have to agree, or the classifier sees a different composition than
+        # it learned on.
+        params["secondary_crop_margin"] = float(
+            config["DEFAULT"].get("secondary_crop_margin", "0.0")
+        )
+
         # ---- tracker block --------------------------------------------
         params["tracker"] = read_tracker_params(config)
         # Kept at the top level for backwards compatibility with any code that
@@ -653,6 +764,48 @@ def validate_configuration(params):
         raise ValueError("secondary_conf_thresh must be in [0, 1)")
     if not 0.0 <= params["val_frequency"] < 1.0:
         raise ValueError("val_frequency must be in [0, 1)")
+
+    # ---- secondary split / balancing / cropping -----------------------
+    if not 0.0 < params["secondary_val_fraction"] < 1.0:
+        raise ValueError(
+            "secondary_val_fraction must be in (0, 1) — a secondary "
+            "classifier with no validation split cannot be checkpointed."
+        )
+    if not 0.0 <= params["secondary_sampler_power"] <= 1.0:
+        raise ValueError(
+            "secondary_sampler_power must be in [0, 1]. 0 disables class "
+            "balancing, 0.5 is sqrt-inverse frequency, 1 is full inverse."
+        )
+    if not 0.0 <= params["secondary_crop_margin"] <= 1.0:
+        raise ValueError(
+            "secondary_crop_margin must be in [0, 1] — it is a fraction of "
+            "the box's own width/height added to EACH side, so 1.0 already "
+            "triples the crop."
+        )
+
+    try:
+        compiled = re.compile(params["secondary_video_regex"])
+    except re.error as e:
+        raise ValueError(f"secondary_video_regex is not a valid regex: {e}")
+    if compiled.groups < 1:
+        raise ValueError(
+            "secondary_video_regex must contain at least one capture group; "
+            "group 1 is used as the source-video identifier."
+        )
+
+    # A subclass listed for exclusion that is not a configured secondary class
+    # is almost always a typo, and a silent one — it would simply never match.
+    unknown = [
+        c
+        for c in params["secondary_ignore_subclasses"]
+        if c not in params["secondary_classes"]
+    ]
+    if unknown:
+        print(
+            f"Warning: secondary_ignore_subclasses names {unknown}, which are "
+            f"not in secondary_classes ({params['secondary_classes']}). "
+            f"Check for typos — unmatched entries do nothing."
+        )
 
     # ---- tracker block ------------------------------------------------
     tp = params["tracker"]

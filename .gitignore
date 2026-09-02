@@ -10,3 +10,5 @@ test/
 fishial/
 videos/
 weights/
+test_crop.py
+*.pt

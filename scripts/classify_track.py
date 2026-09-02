@@ -32,6 +32,24 @@ annotations to run. When weights are absent:
 This lets classification run as soon as any one model trains, instead of
 requiring the full stack.
 
+Class imbalance in the secondary classifiers
+--------------------------------------------
+The behaviour subclasses are heavily skewed (a "moving"-dominated dataset is
+typical). Two mechanisms address that here:
+
+    * BalancedClassificationTrainer replaces the training sampler with a
+      WeightedRandomSampler so every subclass contributes roughly equally
+      per epoch, without deleting any images from disk. The reweighting
+      exponent is `secondary_sampler_power` in the INI (0.0 = off / natural
+      frequencies, 0.5 = sqrt-inverse frequency [default], 1.0 = full inverse
+      frequency). Full inverse is usually too aggressive on a rare class with
+      only a couple of hundred originals — it overfits.
+
+    * Training hyperparameters are chosen per TASK rather than shared with
+      the detectors. See DET_TRAIN_ARGS / CLS_TRAIN_ARGS_* below; in
+      particular the motion classifier gets hue/saturation augmentation
+      disabled, because in a motion image the colour IS the signal.
+
 Tracking
 --------
 Two backends, selected by the `tracker_type` key in the [tracker] section
@@ -53,8 +71,11 @@ Both expose the same interface:
 import csv
 import glob
 import os
+import random
+import re
 import shutil
 import time
+from collections import defaultdict
 
 import cv2
 import numpy as np
@@ -72,6 +93,243 @@ except Exception:  # noqa: BLE001 - boxmot is an optional heavyweight dep
 
 # Load all config into a single dict. See load_configs.py for keys.
 params = load_params()
+
+# Image extensions recognised when counting dataset contents.
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
+
+
+# ============================================================================
+# STAGE 0 — Training hyperparameters, split by task
+# ----------------------------------------------------------------------------
+# maybe_retrain() is shared between the primary DETECTORS and the secondary
+# CLASSIFIERS. Previously it passed one argument block to both, which meant
+# the classifiers were being trained with detector settings:
+#
+#   * box / cls / dfl and mosaic are detection-only losses and augmentations.
+#     Inert for a classification task, but it also meant nobody had ever
+#     actually chosen classification hyperparameters.
+#
+#   * More seriously, Ultralytics' classification defaults include
+#     hsv_h=0.015 and hsv_s=0.7. The motion image encodes three temporally
+#     offset frame differences into the B/G/R channels — the hue and
+#     saturation ARE the motion cue. Jittering them scrambles exactly the
+#     signal the motion classifier needs to separate a directed swim from a
+#     stationary scan. Disabled below for the motion stream only; the static
+#     stream sees real appearance, so mild colour jitter is fine (and helps).
+# ============================================================================
+
+DET_TRAIN_ARGS = dict(
+    # ----- Regularization (Adjusted for Detection) -----
+    weight_decay=0.0005,
+    dropout=0.0,
+    label_smoothing=0.1,
+    batch=16,
+    # ----- Optimizer -----
+    optimizer="AdamW",
+    lr0=0.001,
+    cos_lr=True,
+    # ----- Object-Specific Augmentations (The Magic) -----
+    copy_paste=0.3,
+    mixup=0.1,
+    # ----- Standard Augmentations -----
+    hsv_h=0.015,
+    hsv_s=0.7,
+    hsv_v=0.4,
+    translate=0.2,
+    scale=0.5,
+    degrees=10,
+    erasing=0.2,
+    fliplr=0.5,
+    # --- Loss Weights ---
+    box=7.5,
+    cls=0.5,
+    dfl=1.5,
+)
+
+# Secondary classifier on MOTION crops. Colour is the motion encoding, so
+# hue/saturation augmentation is off. Geometry jitter is kept small because a
+# behaviour crop is already tightly framed on the animal.
+CLS_TRAIN_ARGS_MOTION = dict(
+    dropout=0.2,
+    weight_decay=0.005,
+    batch=128,
+    optimizer="AdamW",
+    lr0=0.001,
+    cos_lr=True,
+    hsv_h=0.0,
+    hsv_s=0.7,
+    hsv_v=0.4,
+    translate=0.15,
+    scale=0.3,
+    degrees=10,
+    erasing=0,
+    fliplr=0.5,
+)
+
+# Secondary classifier on STATIC crops. Colour here is genuine appearance, so
+# normal photometric augmentation applies.
+CLS_TRAIN_ARGS_STATIC = dict(
+    dropout=0.2,
+    weight_decay=0.005,
+    batch=128,
+    optimizer="AdamW",
+    lr0=0.001,
+    cos_lr=True,
+    hsv_h=0.0,
+    hsv_s=0.7,
+    hsv_v=0.4,
+    translate=0.15,
+    scale=0.3,
+    degrees=10,
+    erasing=0,
+    fliplr=0.5,
+)
+
+
+def train_args_for(task, stream=None):
+    """
+    Return a fresh copy of the training-argument block for a given task.
+
+    task   : "detect" (primary models) or "classify" (secondary models)
+    stream : "static" or "motion" — only consulted for classification.
+    """
+    if task == "classify":
+        base = CLS_TRAIN_ARGS_MOTION if stream == "motion" else CLS_TRAIN_ARGS_STATIC
+        return dict(base)
+    return dict(DET_TRAIN_ARGS)
+
+
+# ============================================================================
+# STAGE 0c — Class-balanced sampling for the secondary classifiers
+# ----------------------------------------------------------------------------
+# With a subclass distribution like moving=2500, vigilance=698, bite=327,
+# scanning=194, a classifier trained on natural frequencies collapses toward
+# the majority class: it can score ~67% top-1 by answering "moving" every
+# time, and the gradient signal is dominated by moving regardless.
+#
+# Rather than deleting images from disk, this trainer swaps the training
+# dataloader's sampler for a WeightedRandomSampler with per-sample weight
+#
+#       w_i = 1 / count(class_i) ** power
+#
+# so each class's expected contribution per epoch is equalised (at power=1)
+# or partially equalised (0 < power < 1). num_samples is kept at len(dataset)
+# so epoch length — and therefore the LR schedule and epoch budget — is
+# unchanged.
+#
+# Why the default power is 0.5 and not 1.0: at full inverse frequency each
+# scanning image would be shown roughly 13x as often as each moving image.
+# With only ~194 scanning originals that is a direct route to memorising
+# them. sqrt-inverse is the usual compromise; sweep 0.25 / 0.5 / 0.75 on
+# val macro-F1.
+#
+# Validation is deliberately left UNTOUCHED (mode != "train" returns early):
+# val must reflect the real distribution for the metrics to mean anything.
+# Note however that Ultralytics selects best.pt by val top-1 accuracy, which
+# on a skewed val set still rewards collapsing into the majority class. If
+# checkpoint selection looks wrong, equalise the val split on disk as well.
+#
+# This subclass reaches into Ultralytics internals (dataset.samples, the
+# InfiniteDataLoader type). Those move between releases, so every step is
+# guarded: on any failure it logs and falls back to the stock loader, and
+# training proceeds unbalanced rather than crashing.
+# ============================================================================
+
+try:
+    import torch
+    from torch.utils.data import DataLoader, WeightedRandomSampler
+    from ultralytics.models.yolo.classify import ClassificationTrainer
+
+    class BalancedClassificationTrainer(ClassificationTrainer):
+        """ClassificationTrainer with inverse-frequency training sampler."""
+
+        def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
+            loader = super().get_dataloader(dataset_path, batch_size, rank, mode)
+
+            # Never touch the validation loader.
+            if mode != "train":
+                return loader
+
+            try:
+                dataset = loader.dataset
+
+                # torchvision-style ImageFolder tree: samples is a list of
+                # (path, class_index) pairs.
+                samples = getattr(dataset, "samples", None)
+                if not samples:
+                    print(
+                        "  [balanced-sampler] dataset exposes no .samples — "
+                        "falling back to the default sampler."
+                    )
+                    return loader
+
+                targets = np.asarray([int(s[1]) for s in samples])
+                n_classes = int(targets.max()) + 1
+                counts = np.bincount(targets, minlength=n_classes).astype(np.float64)
+
+                power = float(params.get("secondary_sampler_power", 0.5))
+                if power <= 0.0:
+                    print("  [balanced-sampler] power <= 0, sampler disabled.")
+                    return loader
+
+                weights_per_class = 1.0 / np.maximum(counts, 1.0) ** power
+                sample_weights = weights_per_class[targets]
+
+                # Report what the sampler will actually do, per class.
+                # Ultralytics' ClassificationDataset keeps the ImageFolder on
+                # .base, so .classes is not on the dataset itself.
+                names = (
+                    getattr(dataset, "classes", None)
+                    or getattr(getattr(dataset, "base", None), "classes", None)
+                    or [str(i) for i in range(n_classes)]
+                )
+                share = (weights_per_class * counts) / (
+                    weights_per_class * counts
+                ).sum()
+                print(f"  [balanced-sampler] power={power}")
+                for i, name in enumerate(names[:n_classes]):
+                    print(
+                        f"      {name:<12} n={int(counts[i]):>5}  "
+                        f"natural={counts[i] / counts.sum():.3f}  "
+                        f"sampled={share[i]:.3f}"
+                    )
+
+                sampler = WeightedRandomSampler(
+                    torch.as_tensor(sample_weights, dtype=torch.double),
+                    num_samples=len(targets),  # keep epoch length unchanged
+                    replacement=True,
+                )
+
+                return DataLoader(
+                    dataset,
+                    batch_size=batch_size,
+                    sampler=sampler,
+                    num_workers=getattr(loader, "num_workers", 0),
+                    pin_memory=getattr(loader, "pin_memory", True),
+                    collate_fn=getattr(loader, "collate_fn", None),
+                    drop_last=getattr(loader, "drop_last", False),
+                    persistent_workers=False,
+                )
+            except Exception as e:  # noqa: BLE001 - never fail training over this
+                print(
+                    f"  Warning: balanced sampler unavailable ({e}); "
+                    "training with the default sampler."
+                )
+                return loader
+
+except Exception as e:  # noqa: BLE001 - torch/ultralytics layout changed
+    print(f"Note: BalancedClassificationTrainer unavailable ({e}).")
+    BalancedClassificationTrainer = None
+
+
+def trainer_kwarg_for(task):
+    """
+    Return {"trainer": ...} for classification when the balanced trainer is
+    importable, else {} so model.train() uses the stock trainer.
+    """
+    if task == "classify" and BalancedClassificationTrainer is not None:
+        return {"trainer": BalancedClassificationTrainer}
+    return {}
 
 
 # ============================================================================
@@ -268,12 +526,79 @@ global_response = 0
 # ============================================================================
 
 
+# Split directory names, in preference order. Ultralytics classification uses
+# train/ and val/; other exporters emit valid/, validation/ or test/.
+TRAIN_SPLIT_NAMES = ("train", "training")
+VAL_SPLIT_NAMES = ("val", "valid", "validation", "test")
+
+
+def count_images_under(root):
+    """Count image files anywhere under `root`, at any depth. 0 if absent."""
+    if not root or not os.path.isdir(root):
+        return 0
+    n = 0
+    for _dirpath, _dirnames, files in os.walk(root):
+        n += sum(1 for f in files if os.path.splitext(f)[1].lower() in IMAGE_EXTS)
+    return n
+
+
+def find_split_dir(path, names):
+    """
+    Locate a split directory under `path` by name.
+
+    Checks <path>/<name> first, then one level deeper (<path>/*/<name>) to
+    cover layouts that wrap the splits, e.g. <path>/images/train/<class>.
+    Returns the absolute-ish path or None.
+    """
+    for n in names:
+        d = os.path.join(path, n)
+        if os.path.isdir(d):
+            return d
+    try:
+        mids = sorted(os.listdir(path))
+    except OSError:
+        return None
+    for mid in mids:
+        mid_dir = os.path.join(path, mid)
+        if not os.path.isdir(mid_dir):
+            continue
+        for n in names:
+            d = os.path.join(mid_dir, n)
+            if os.path.isdir(d):
+                return d
+    return None
+
+
 def count_images_in_dataset(path):
     """
-    Count images in a training dataset.
-      * YAML path   -> read the `train:` key, count files there
-      * directory   -> recursive, count image files in leaf dirs only
-    Returns 0 on any error.
+    Count images in a training dataset. Returns (train_count, val_count).
+
+      * YAML path   -> read the `train:` / `val:` keys, count files in each
+      * directory   -> classification tree; counts <path>/train/<class>/* and
+                       <path>/val/<class>/* SEPARATELY
+    Returns (0, 0) on any error.
+
+    NOTE ON THE DIRECTORY BRANCH
+    ----------------------------
+    This used to os.walk() the whole tree, sum every leaf directory, and
+    return that single total as BOTH the train and the val count. Three
+    things went wrong as a result:
+
+      1. The readiness summary reported train+val as the training size, so
+         the dataset looked roughly twice as large as it was.
+      2. The `train != last_count` retrain trigger compared a number that
+         conflated both splits, so a change confined to val forced a
+         needless retrain (and a change that moved N images from val to
+         train looked like no change at all).
+      3. The `val_count < 2` guard could never fire independently: a class
+         with plenty of train images but ZERO val images still passed, and
+         training then ran without a usable validation split.
+
+    Because the recorded train_count.txt values were written under the old
+    (train+val) semantics, the first run after this change will see a
+    "changed" count for every secondary model and trigger one retrain. That
+    is expected and self-correcting — delete the train_count.txt files
+    beforehand if you would rather skip the fine-tune pass.
     """
     # Primary-model case: YAML descriptor pointing at images/train
     if path.endswith(".yaml"):
@@ -297,13 +622,12 @@ def count_images_in_dataset(path):
                     val_count = len(f.readlines()) if abs_val_path else 0
             else:
                 # Directory full of image files.
-                image_exts = [".jpg", ".jpeg", ".png", ".bmp", ".tiff"]
                 train_count = (
                     len(
                         [
                             f
                             for f in os.listdir(abs_train_path)
-                            if os.path.splitext(f)[1].lower() in image_exts
+                            if os.path.splitext(f)[1].lower() in IMAGE_EXTS
                         ]
                     )
                     if abs_train_path
@@ -314,7 +638,7 @@ def count_images_in_dataset(path):
                         [
                             f
                             for f in os.listdir(abs_val_path)
-                            if os.path.splitext(f)[1].lower() in image_exts
+                            if os.path.splitext(f)[1].lower() in IMAGE_EXTS
                         ]
                     )
                     if abs_val_path
@@ -325,24 +649,240 @@ def count_images_in_dataset(path):
             print(f"Error counting images: {e}")
             return 0, 0
 
-    # Secondary-model case: class-folder tree.
+    # Secondary-model case: classification tree, <path>/<split>/<class>/*.jpg
     elif os.path.isdir(path):
-        total_count = 0
-        image_exts = [".jpg", ".jpeg", ".png", ".bmp", ".tiff"]
-        for root, dirs, files in os.walk(path):
-            if not dirs:  # leaf class directory
-                total_count += sum(
-                    1 for f in files if os.path.splitext(f)[1].lower() in image_exts
-                )
-        return total_count, total_count
+        train_dir = find_split_dir(path, TRAIN_SPLIT_NAMES)
+
+        if train_dir is not None:
+            val_dir = find_split_dir(path, VAL_SPLIT_NAMES)
+            return count_images_under(train_dir), count_images_under(val_dir)
+
+        # No split directory. The tree is flat class folders
+        # (<path>/<subclass>/*.jpg) — Ultralytics cannot train from this
+        # layout at all. Report the total as both counts (the pre-fix
+        # behaviour) so the caller's >= 2 guard still passes and training
+        # proceeds to the point where Ultralytics gives a real error,
+        # rather than this function silently claiming the dataset is empty.
+        total = count_images_under(path)
+        return total, total
 
     else:
         print(f"Unsupported dataset format: {path}")
         return 0, 0
 
 
+def count_subclasses_in_dataset(path, split="train"):
+    """
+    Per-subclass image counts for one split of a classification tree.
+    Returns {subclass_name: n}.
+
+    Falls back to the flat layout (<path>/<subclass>/*) when no split
+    directory exists, so the breakdown still prints on an unsplit tree.
+    """
+    names = TRAIN_SPLIT_NAMES if split.startswith("train") else VAL_SPLIT_NAMES
+    root = find_split_dir(path, names)
+    if root is None:
+        # Unsplit tree: the class folders are directly under `path`. Only
+        # meaningful for the train side; report nothing for val.
+        if split.startswith("train") and os.path.isdir(path):
+            root = path
+        else:
+            return {}
+
+    counts = {}
+    for sub in sorted(os.listdir(root)):
+        class_dir = os.path.join(root, sub)
+        if not os.path.isdir(class_dir) or sub in TRAIN_SPLIT_NAMES + VAL_SPLIT_NAMES:
+            continue
+        counts[sub] = count_images_under(class_dir)
+    return counts
+
+
+# ============================================================================
+# STAGE 1b — Staging a train/val split from a flat class tree
+# ----------------------------------------------------------------------------
+# The annotation tree is kept FLAT on purpose:
+#
+#     annot_motion_crop/fish/{bite,chase,escape,moving,scanning,vigilance}/*.jpg
+#
+# Ultralytics >= 8.4 tolerates that by auto-splitting into a sibling
+# "<name>_split" directory, 80/20, sampled per image. Two problems with
+# letting it:
+#
+#   1. A class with fewer images than the split ratio can land entirely on
+#      one side. `escape` (1 image) went wholly to val, so train saw 5
+#      classes and val 6, and the run aborted with
+#          "found 3576 images in 5 classes (requires 6 classes, not 5)"
+#      before any dataloader — and therefore the balanced sampler — existed.
+#
+#   2. The split is per IMAGE. Consecutive crops from one track are near
+#      duplicates, so the same animal in the same second appears in both
+#      train and val. Val accuracy measured that way is inflated and says
+#      nothing about held-out video.
+#
+# So the split is staged here instead, into the model directory, as a build
+# artefact. The annotation tree is never written to. Files are SYMLINKED, so
+# staging costs no disk and no copy time.
+#
+# Grouping: crops are grouped by source video (see `secondary_video_regex`)
+# and whole videos are assigned to one side or the other. If the pattern
+# matches nothing useful the code says so and falls back to a per-image
+# split for that class, which is no worse than the Ultralytics default.
+#
+# Classes too small to split, or listed in `secondary_ignore_subclasses`,
+# are excluded from BOTH sides — which is what keeps the class sets
+# identical and the run alive.
+# ============================================================================
+
+# Everything before the first _id / _frame / _track marker is treated as the
+# source video name. Override with `secondary_video_regex` in the INI.
+DEFAULT_VIDEO_REGEX = r"^(.*?)(?:_id\d+|_frame\d+|_track\d+)"
+
+
+def _video_key(filename, pattern):
+    """Source-video identifier for a crop filename."""
+    if pattern is not None:
+        m = pattern.match(filename)
+        if m and m.group(1):
+            return m.group(1)
+    # No match: treat the file as its own group (=> per-image split).
+    return os.path.splitext(filename)[0]
+
+
+def stage_split_dataset(
+    src_root,
+    dst_root,
+    val_fraction=0.2,
+    seed=0,
+    ignore=(),
+    min_train=2,
+    min_val=2,
+    video_regex=DEFAULT_VIDEO_REGEX,
+):
+    """
+    Build <dst_root>/{train,val}/<class>/ as symlinks into a flat <src_root>.
+
+    Rebuilt from scratch on every call, so it always reflects the current
+    annotations. Returns dst_root, or None if fewer than two classes survive.
+    """
+    if not os.path.isdir(src_root):
+        print(f"  Cannot stage dataset: '{src_root}' does not exist.")
+        return None
+
+    try:
+        pattern = re.compile(video_regex) if video_regex else None
+    except re.error as e:
+        print(f"  Warning: bad secondary_video_regex ({e}); grouping disabled.")
+        pattern = None
+
+    reserved = set(TRAIN_SPLIT_NAMES) | set(VAL_SPLIT_NAMES)
+    ignore = {c.strip() for c in ignore if c and c.strip()}
+
+    classes = [
+        d
+        for d in sorted(os.listdir(src_root))
+        if os.path.isdir(os.path.join(src_root, d)) and d not in reserved
+    ]
+
+    rng = random.Random(seed)
+    plan = {}  # class -> (train_files, val_files)
+    dropped = []
+
+    for cls in classes:
+        cdir = os.path.join(src_root, cls)
+        files = sorted(
+            f for f in os.listdir(cdir) if os.path.splitext(f)[1].lower() in IMAGE_EXTS
+        )
+        if cls in ignore:
+            dropped.append((cls, len(files), "listed in secondary_ignore_subclasses"))
+            continue
+        if len(files) < min_train + min_val:
+            dropped.append(
+                (cls, len(files), f"needs >= {min_train + min_val} images to split")
+            )
+            continue
+
+        groups = defaultdict(list)
+        for f in files:
+            groups[_video_key(f, pattern)].append(f)
+
+        keys = sorted(groups)
+        rng.shuffle(keys)
+        target = len(files) * val_fraction
+
+        val_files, train_files = [], []
+        for k in keys:
+            take_val = (
+                len(val_files) < target
+                and len(train_files) + len(groups[k]) <= len(files) - min_val
+            )
+            (val_files if take_val else train_files).extend(groups[k])
+
+        grouped_ok = len(train_files) >= min_train and len(val_files) >= min_val
+
+        if not grouped_ok:
+            # One dominant group swallowed the class. Fall back to a
+            # per-image split so the class is not lost entirely.
+            print(
+                f"  Note: '{cls}' could not be split by video "
+                f"({len(keys)} group(s) for {len(files)} images) — "
+                "falling back to a per-image split for this class. "
+                "Its val score will be optimistic."
+            )
+            shuffled = list(files)
+            rng.shuffle(shuffled)
+            n_val = max(min_val, int(round(len(shuffled) * val_fraction)))
+            n_val = min(n_val, len(shuffled) - min_train)
+            val_files = shuffled[:n_val]
+            train_files = shuffled[n_val:]
+
+        plan[cls] = (train_files, val_files)
+
+    if len(plan) < 2:
+        print(
+            f"  Cannot stage dataset from '{src_root}': only {len(plan)} "
+            "usable class(es) after filtering; a classifier needs at least 2."
+        )
+        return None
+
+    # Rebuild from scratch — stale staged trees are worse than none.
+    if os.path.isdir(dst_root):
+        shutil.rmtree(dst_root)
+
+    for cls, (train_files, val_files) in plan.items():
+        for split, group in (("train", train_files), ("val", val_files)):
+            out_dir = os.path.join(dst_root, split, cls)
+            os.makedirs(out_dir, exist_ok=True)
+            for f in group:
+                src = os.path.abspath(os.path.join(src_root, cls, f))
+                dst = os.path.join(out_dir, f)
+                try:
+                    os.symlink(src, dst)
+                except OSError:
+                    # Filesystem without symlink support (or Windows without
+                    # developer mode) — fall back to copying.
+                    shutil.copy2(src, dst)
+
+    print(f"  Staged split -> {dst_root}")
+    for cls in sorted(plan):
+        tr, va = plan[cls]
+        print(f"      {cls:<12} train={len(tr):>5}  val={len(va):>5}")
+    for cls, n, why in dropped:
+        print(f"      {cls:<12} EXCLUDED ({n} images: {why})")
+
+    return dst_root
+
+
 def maybe_retrain(
-    model_type, yaml_path, project_path, model_path, classifier, epochs, imgsz
+    model_type,
+    yaml_path,
+    project_path,
+    model_path,
+    classifier,
+    epochs,
+    imgsz,
+    task="detect",
+    stream=None,
 ):
     """
     Decide whether to (re)train a model based on existence and image counts.
@@ -354,8 +894,18 @@ def maybe_retrain(
         the dataset has at least 2 images.
       * count unchanged                   -> no-op.
 
+    task   : "detect" for the primary detectors, "classify" for the
+             secondary classifiers. Selects the hyperparameter block and,
+             for classification, the class-balanced trainer.
+    stream : "static" or "motion" — only used to pick the classification
+             augmentation profile (motion crops must not get hue/saturation
+             jitter).
+
     Returns True if training ran, False otherwise.
     """
+    extra = train_args_for(task, stream)
+    extra.update(trainer_kwarg_for(task))
+
     # ---- branch A: model already exists -------------------------------
     if os.path.exists(model_path):
         # Load the last-trained image count (or -1 if unknown).
@@ -402,22 +952,10 @@ def maybe_retrain(
                 name="train",
                 exist_ok=True,
                 # --- Core Training ---
-                batch=params["train_batch"],
                 device=params["train_device"],
-                # --- Optimizer & Learning Rate ---
-                optimizer="AdamW",
-                lr0=0.001,
-                lrf=0.01,
-                # --- Augmentation (tweaked for the motion encoding) ---
-                mosaic=1.0,
-                close_mosaic=10,
-                scale=0.0,  # protects motion-colour gradients
-                translate=0.0,  # preserves motion cues
-                fliplr=0.5,
-                # --- Loss Weights ---
-                box=7.5,
-                cls=0.5,
-                dfl=1.5,
+                patience=60,
+                # --- Task-specific optimizer / augmentation / loss block ---
+                **extra,
             )
             try:
                 move_to_expected(project_path, run_name="train", runs_root="runs")
@@ -462,22 +1000,10 @@ def maybe_retrain(
             name="train",
             exist_ok=True,
             # --- Core Training ---
-            batch=params["train_batch"],
             device=params["train_device"],
-            # --- Optimizer & Learning Rate ---
-            optimizer="AdamW",
-            lr0=0.001,
-            lrf=0.01,
-            # --- Augmentation ---
-            mosaic=1.0,
-            close_mosaic=10,
-            scale=0.0,
-            translate=0.0,
-            fliplr=0.5,
-            # --- Loss Weights ---
-            box=7.5,
-            cls=0.5,
-            dfl=1.5,
+            patience=60,
+            # --- Task-specific optimizer / augmentation / loss block ---
+            **extra,
         )
         try:
             move_to_expected(project_path, run_name="train", runs_root="runs")
@@ -533,7 +1059,13 @@ def train_models():
                         "skipping all static secondary models."
                     )
                 else:
-                    for primary_class in params["primary_classes"]:
+                    # dict.fromkeys deduplicates while preserving order. A
+                    # repeated entry in primary_classes would otherwise train
+                    # the same model_dir twice, because .index() below always
+                    # returns the FIRST match — so every duplicate iteration
+                    # recomputes an identical idx, data_dir and weights_path,
+                    # then overwrites the weights it just produced.
+                    for primary_class in dict.fromkeys(params["primary_classes"]):
                         idx = params["primary_classes"].index(primary_class)
                         hotkey = params["primary_hotkeys"][idx]
 
@@ -553,24 +1085,58 @@ def train_models():
                             model_dir, "train", "weights", "best.pt"
                         )
 
-                        n_image = count_images_in_dataset(data_dir)
-
-                        if n_image[0] < 2:
+                        # train/val are now counted separately (see
+                        # count_images_in_dataset) so a class with no val
+                        # split is caught here instead of silently training.
+                        train_count, val_count = count_images_in_dataset(data_dir)
+                        if train_count < 2 or val_count < 2:
                             print(
                                 f"Error: Not enough images to train secondary static model "
-                                f"for primary class '{primary_class}' (found {n_image}, "
-                                f"need at least 2). Skipping this secondary model."
+                                f"for primary class '{primary_class}' (found {train_count} "
+                                f"training images and {val_count} validation images, "
+                                f"need at least 2 of each). Skipping this secondary model."
+                            )
+                            continue
+
+                        sub_counts = count_subclasses_in_dataset(data_dir, "train")
+                        if sub_counts:
+                            print(
+                                f"  [{primary_class}] static subclasses: "
+                                + ", ".join(f"{k}={v}" for k, v in sub_counts.items())
+                            )
+
+                        # Stage a deterministic, video-grouped split rather
+                        # than letting Ultralytics improvise one. Training
+                        # reads from here; the annotation tree stays flat.
+                        train_root = stage_split_dataset(
+                            data_dir,
+                            os.path.join(model_dir, "dataset"),
+                            val_fraction=float(
+                                params.get("secondary_val_fraction", 0.2)
+                            ),
+                            seed=int(params.get("secondary_split_seed", 0)),
+                            ignore=params.get("secondary_ignore_subclasses", []),
+                            video_regex=params.get(
+                                "secondary_video_regex", DEFAULT_VIDEO_REGEX
+                            ),
+                        )
+                        if train_root is None:
+                            print(
+                                f"  Skipping static secondary for "
+                                f"'{primary_class}': could not stage a split."
                             )
                             continue
 
                         maybe_retrain(
                             model_dir,
-                            data_dir,
+                            train_root,
                             model_dir,
                             weights_path,
                             params["secondary_classifier"],
                             params["secondary_epochs"],
                             params["secondary_imgsz"],
+                            task="classify",
+                            stream="static",
                         )
 
                         if os.path.isfile(weights_path):
@@ -620,7 +1186,8 @@ def train_models():
                     "skipping all motion secondary models."
                 )
             else:
-                for primary_class in params["primary_classes"]:
+                # See the static block: deduplicated for the same reason.
+                for primary_class in dict.fromkeys(params["primary_classes"]):
                     idx = params["primary_classes"].index(primary_class)
                     hotkey = params["primary_hotkeys"][idx]
 
@@ -649,14 +1216,41 @@ def train_models():
                         )
                         continue
 
+                    sub_counts = count_subclasses_in_dataset(data_dir, "train")
+                    if sub_counts:
+                        print(
+                            f"  [{primary_class}] motion subclasses: "
+                            + ", ".join(f"{k}={v}" for k, v in sub_counts.items())
+                        )
+
+                    # See the static block above.
+                    train_root = stage_split_dataset(
+                        data_dir,
+                        os.path.join(model_dir, "dataset"),
+                        val_fraction=float(params.get("secondary_val_fraction", 0.2)),
+                        seed=int(params.get("secondary_split_seed", 0)),
+                        ignore=params.get("secondary_ignore_subclasses", []),
+                        video_regex=params.get(
+                            "secondary_video_regex", DEFAULT_VIDEO_REGEX
+                        ),
+                    )
+                    if train_root is None:
+                        print(
+                            f"  Skipping motion secondary for '{primary_class}': "
+                            "could not stage a split."
+                        )
+                        continue
+
                     maybe_retrain(
                         model_dir,
-                        data_dir,
+                        train_root,
                         model_dir,
                         weights_path,
                         params["secondary_classifier"],
                         params["secondary_epochs"],
                         params["secondary_imgsz"],
+                        task="classify",
+                        stream="motion",
                     )
 
                     if os.path.isfile(weights_path):
@@ -694,6 +1288,7 @@ def train_models():
                 params["primary_classifier"],
                 params["primary_epochs"],
                 params["primary_imgsz"],
+                task="detect",
             )
 
     if params["primary_motion_classes"][0] != "0":
@@ -705,6 +1300,7 @@ def train_models():
             params["primary_classifier"],
             params["primary_epochs"],
             params["primary_imgsz"],
+            task="detect",
         )
 
 
@@ -746,6 +1342,76 @@ def true_iou(box1, box2):
     area2 = max(0, box2[2] - box2[0]) * max(0, box2[3] - box2[1])
     union = area1 + area2 - inter
     return inter / union if union > 0 else 0.0
+
+
+# ============================================================================
+# STAGE 4a — Crop extraction
+# ----------------------------------------------------------------------------
+# Pulling the secondary-classifier crop out of a frame used to be a bare
+# slice: frame[y1:y2, x1:x2]. Two problems with that.
+#
+#   1. NO BOUNDS CHECK. Merged detection boxes are taken wholesale from
+#      whichever stream won the merge, and nothing guarantees they lie inside
+#      the frame. A negative x1 makes numpy index from the END of the axis,
+#      so instead of erroring you silently classify a thin strip from the
+#      opposite side of the image. x1 > x2 or an off-frame box yields an
+#      empty array, which _run() then rejects — so the detection quietly
+#      loses its secondary label with no diagnostic.
+#
+#   2. NO CONTEXT. A tight box crops away the very evidence some behaviour
+#      classes are defined by: what the animal is oriented toward (substrate,
+#      a conspecific, shelter). On the MOTION image it is worse — a moving
+#      animal's coloured difference tail extends behind it, outside the
+#      detection box, so a tight crop discards the clearest motion cue
+#      available.
+#
+# `secondary_crop_margin` in the INI expands the box by that fraction of its
+# own width/height on each side before clamping. It defaults to 0.0, i.e.
+# exactly the previous framing.
+#
+# IMPORTANT: if you change the margin you MUST regenerate the training crops
+# with the same value. Train-time and inference-time crop geometry have to
+# match, or the classifier sees a different framing than it learned on. Treat
+# 0.0 / 0.15 / 0.3 as an ablation, not a free knob.
+# ============================================================================
+
+
+def expand_and_clamp_box(coords, width, height, margin=0.0):
+    """
+    Expand a box by `margin` (fraction of its own w/h, each side) and clamp
+    it to the image. Returns (x1, y1, x2, y2) or None if the result is empty.
+    """
+    x1, y1, x2, y2 = coords
+
+    # Normalise ordering — merged boxes are not guaranteed to be sorted.
+    x1, x2 = (x1, x2) if x1 <= x2 else (x2, x1)
+    y1, y2 = (y1, y2) if y1 <= y2 else (y2, y1)
+
+    if margin:
+        bw = x2 - x1
+        bh = y2 - y1
+        x1 -= margin * bw
+        x2 += margin * bw
+        y1 -= margin * bh
+        y2 += margin * bh
+
+    cx1 = max(0, int(round(x1)))
+    cy1 = max(0, int(round(y1)))
+    cx2 = min(int(width), int(round(x2)))
+    cy2 = min(int(height), int(round(y2)))
+
+    if cx2 <= cx1 or cy2 <= cy1:
+        return None
+    return cx1, cy1, cx2, cy2
+
+
+def crop_region(image, box):
+    """Slice `box` out of `image`, or return None if either is unusable."""
+    if image is None or box is None:
+        return None
+    cx1, cy1, cx2, cy2 = box
+    crop = image[cy1:cy2, cx1:cx2]
+    return crop if crop.size else None
 
 
 # ============================================================================
@@ -1149,6 +1815,10 @@ def process_video(file):
         (w, h),
     )
 
+    # Crop margin for the secondary classifiers. Must match whatever was used
+    # to generate the training crops — see expand_and_clamp_box().
+    crop_margin = float(params.get("secondary_crop_margin", 0.0))
+
     # ---- STAGE 2b: defensively load primary models --------------------
     # For each stream, three things must be true to load:
     #   (1) the stream is configured in the INI (classes[0] != "0")
@@ -1286,6 +1956,7 @@ def process_video(file):
                 )
             gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
             frame = raw_frame.copy()
+            frame_h, frame_w = frame.shape[:2]
 
             # Prime the 3-frame history on the first iteration.
             if prev_frames is None:
@@ -1476,13 +2147,27 @@ def process_video(file):
                 if params["hierarchical_mode"] and (
                     primary_conf >= params["primary_conf_thresh"]
                 ):
-                    x1, y1, x2, y2 = coords
+                    # Expand by secondary_crop_margin and clamp to the frame.
+                    # The clamp is not optional hygiene: an unclamped negative
+                    # coordinate makes numpy wrap to the far side of the axis,
+                    # so the classifier silently receives a strip of the wrong
+                    # part of the image rather than raising.
+                    crop_box = expand_and_clamp_box(
+                        coords, frame_w, frame_h, margin=crop_margin
+                    )
+                    if crop_box is None:
+                        # Box lies entirely outside the frame — nothing to
+                        # classify. Say so rather than failing quietly.
+                        print(
+                            f"  Warning: detection box {coords} is outside the "
+                            f"{frame_w}x{frame_h} frame at frame {frame_idx}; "
+                            "skipping secondary classification for it."
+                        )
+
                     # Uses the motion image built once in 3b — does NOT rebuild
                     # it (that was the frame-history corruption bug).
-                    static_crop = frame[y1:y2, x1:x2] if frame is not None else None
-                    motion_crop = (
-                        motion_image[y1:y2, x1:x2] if motion_image is not None else None
-                    )
+                    static_crop = crop_region(frame, crop_box)
+                    motion_crop = crop_region(motion_image, crop_box)
 
                     def _run(model_dict, crop):
                         if model_dict is None or crop is None or crop.size == 0:
