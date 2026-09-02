@@ -398,7 +398,221 @@ def build_models(params, args):
     return m
 
 
+# ---------------------------------------------------------------------------
+# Background generation (temporal median) – separate module
+# ---------------------------------------------------------------------------
+def generate_backgrounds(params, args):
+    """
+    Standalone background frame generator.
+
+    For each video, sample `args.generate_backgrounds` temporal windows uniformly
+    across the video, compute the pixel‑wise median of each window, and write
+    the result as a background frame (empty .txt label) into the primary
+    static/motion train/val folders.
+
+    The function respects --bg-static and --bg-motion flags. If neither is given,
+    it writes to both streams (provided the stream is configured in the project).
+
+    Naming convention: <video_label>_bg_<six_digit_index>.jpg/.txt
+
+    This function is called from pseudo_label() and causes an immediate exit
+    after completion, making it act as a separate sub‑command.
+    """
+    import cv2
+    import numpy as np
+    import random
+
+    target_per_video = args.generate_backgrounds
+    if target_per_video <= 0:
+        return
+
+    window = args.bg_window
+    if window < 2:
+        print("[bg] ERROR: --bg-window must be at least 2.")
+        sys.exit(1)
+
+    # Determine which streams are configured.
+    static_configured = (
+        len(params["primary_static_classes"]) > 0
+        and params["primary_static_classes"][0] != "0"
+    )
+    motion_configured = (
+        len(params["primary_motion_classes"]) > 0
+        and params["primary_motion_classes"][0] != "0"
+    )
+
+    do_static = args.bg_static
+    do_motion = args.bg_motion
+    # If user specified neither, default to both configured streams.
+    if not do_static and not do_motion:
+        do_static = static_configured
+        do_motion = motion_configured
+
+    # Clamp to what actually exists.
+    do_static = do_static and static_configured
+    do_motion = do_motion and motion_configured
+
+    if not do_static and not do_motion:
+        print(
+            "[bg] No stream selected (or configured). "
+            "Use --bg-static, --bg-motion, or configure primary classes."
+        )
+        return
+
+    # Output directories.
+    static_dirs = (
+        params["static_train_images_dir"],
+        params["static_train_labels_dir"],
+        params["static_val_images_dir"],
+        params["static_val_labels_dir"],
+    )
+    motion_dirs = (
+        params["motion_train_images_dir"],
+        params["motion_train_labels_dir"],
+        params["motion_val_images_dir"],
+        params["motion_val_labels_dir"],
+    )
+
+    if not args.dry_run:
+        for d in static_dirs + motion_dirs:
+            os.makedirs(d, exist_ok=True)
+
+    # Split seed – deterministic but can be overridden via INI if we add that key.
+    val_freq = (
+        args.val_frequency
+        if args.val_frequency is not None
+        else float(params.get("val_frequency", 0.1))
+    )
+    rng = random.Random(0)
+
+    print("[bg] Starting background generation (temporal median)")
+    print(f"[bg]   Target frames per video: {target_per_video}")
+    print(f"[bg]   Window size: {window}")
+    print(f"[bg]   Static stream: {'yes' if do_static else 'no'}")
+    print(f"[bg]   Motion stream: {'yes' if do_motion else 'no'}")
+    print(f"[bg]   Val fraction: {val_freq}")
+    print(f"[bg]   Dry run: {args.dry_run}")
+    print()
+
+    total_bg_written = 0
+
+    for video_path in _iter_videos(params["clips_dir"]):
+        vlabel = _video_label(video_path, params["clips_dir"])
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"  [bg] skip: cannot open {video_path}")
+            continue
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames < window:
+            print(
+                f"  [bg] skip: {os.path.basename(video_path)} too short ({total_frames} < {window})"
+            )
+            cap.release()
+            continue
+
+        # Determine step size to uniformly sample `target_per_video` windows.
+        # We want start indices s such that 0 <= s <= total_frames - window.
+        max_start = total_frames - window
+        if target_per_video >= max_start + 1:
+            # If target >= number of possible windows, just take one every `window` frames.
+            step = window
+            # But clamp target to avoid infinite loops.
+            actual_target = min(target_per_video, (total_frames // window))
+        else:
+            # Uniformly spaced windows.
+            step = max(1, (max_start + 1) // target_per_video)
+            actual_target = target_per_video
+
+        # Read the whole video into memory? For large videos, better to seek.
+        # We'll sample by seeking to start positions and reading `window` frames.
+        # However, seeking backwards/forwards with H.264 can be slow.
+        # Simpler: read sequentially, compute median at each step.
+        # We'll store only the current window buffer.
+        frames_buffer = []
+        frame_idx = 0
+        generated = 0
+        next_write_idx = 0  # we want roughly evenly spaced writes
+
+        # We'll compute the target step in terms of frame indices.
+        # If we want `actual_target` windows, we write at positions:
+        # start_positions = [0, step, 2*step, ...] capped.
+        # We'll generate `actual_target` windows.
+        # But we can just read sequentially and when frame_idx equals next_start, compute median.
+        start_positions = [min(i * step, max_start) for i in range(actual_target)]
+
+        # Remove duplicates
+        start_positions = sorted(set(start_positions))
+
+        for start in start_positions:
+            # Seek to start
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+            frames_buffer = []
+            for _ in range(window):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if params["scale_factor"] != 1.0:
+                    frame = cv2.resize(
+                        frame,
+                        None,
+                        fx=params["scale_factor"],
+                        fy=params["scale_factor"],
+                    )
+                frames_buffer.append(frame)
+            if len(frames_buffer) < window:
+                continue  # should not happen if start <= max_start
+
+            median_img = np.median(frames_buffer, axis=0).astype(np.uint8)
+
+            # Train/val assignment
+            is_val = rng.random() < val_freq
+            base = f"{vlabel}_bg_{generated:06d}"
+            generated += 1
+
+            # Write static
+            if do_static:
+                img_dir = static_dirs[2] if is_val else static_dirs[0]
+                lbl_dir = static_dirs[3] if is_val else static_dirs[1]
+                if not args.dry_run:
+                    cv2.imwrite(os.path.join(img_dir, f"{base}.jpg"), median_img)
+                    with open(os.path.join(lbl_dir, f"{base}.txt"), "w") as f:
+                        pass  # empty -> background
+                total_bg_written += 1
+
+            # Write motion (same median image)
+            if do_motion:
+                img_dir = motion_dirs[2] if is_val else motion_dirs[0]
+                lbl_dir = motion_dirs[3] if is_val else motion_dirs[1]
+                if not args.dry_run:
+                    cv2.imwrite(os.path.join(img_dir, f"{base}.jpg"), median_img)
+                    with open(os.path.join(lbl_dir, f"{base}.txt"), "w") as f:
+                        pass
+                total_bg_written += 1
+
+            # Stop if we've generated enough for this video (avoid overrun if duplicates removed)
+            if generated >= target_per_video:
+                break
+
+        cap.release()
+        print(f"  [bg] {os.path.basename(video_path)}: generated {generated} windows")
+
+    print()
+    print(
+        f"[bg] Done. Total background images written (across all streams): {total_bg_written}"
+    )
+    if args.dry_run:
+        print("[bg] DRY RUN — no files were written.")
+
+
 def pseudo_label(params, args):
+    # ---- BACKGROUND GENERATION MODULE (separate) ----
+    if args.generate_backgrounds > 0:
+        generate_backgrounds(params, args)
+        # Exit immediately so the pseudo-labeller does not run.
+        print("[bg] Background generation complete. Exiting.")
+        return
+
     conf = args.conf if args.conf is not None else DEFAULT_CONF
     val_freq = (
         args.val_frequency
@@ -713,7 +927,31 @@ def main():
         action="store_true",
         help="Don't write files, just print what would happen",
     )
-
+    # ---------- Background generation flags ----------
+    ap.add_argument(
+        "--generate-backgrounds",
+        type=int,
+        default=0,
+        help="Generate N background frames per video using temporal median, then exit. "
+        "0 = disabled.",
+    )
+    ap.add_argument(
+        "--bg-window",
+        type=int,
+        default=30,
+        help="Number of consecutive frames to median over (default: 30).",
+    )
+    ap.add_argument(
+        "--bg-static",
+        action="store_true",
+        help="Write backgrounds to the static stream dataset.",
+    )
+    ap.add_argument(
+        "--bg-motion",
+        action="store_true",
+        help="Write backgrounds to the motion stream dataset.",
+    )
+    # If neither --bg-static nor --bg-motion is given, we default to both (if the stream exists).
     args = ap.parse_args()
 
     # load_params() reads sys.argv[1] itself (project dir OR .ini path) and
