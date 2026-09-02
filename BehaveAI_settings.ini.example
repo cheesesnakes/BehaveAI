@@ -82,11 +82,6 @@ secondary_video_regex        = ^(.*?)(?:_id\d+|_frame\d+|_track\d+)
 secondary_sampler_power      = 0.5
 secondary_crop_margin        = 0.0
 
-; ---------- (Some settings repeated – keep consistent) ----------
-centroid_merge_thresh = 50
-iou_thresh            = 0.4
-match_distance_thresh = 100
-delete_after_missed   = 5
 
 ; ---------------------------------------------------------------------------
 ; [tracker] – settings for the tracking backend (BoxMOT)
