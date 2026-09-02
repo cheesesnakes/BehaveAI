@@ -157,13 +157,15 @@ CLS_TRAIN_ARGS_MOTION = dict(
     lr0=0.001,
     cos_lr=True,
     hsv_h=0.0,
-    hsv_s=0.7,
-    hsv_v=0.4,
+    hsv_s=0.0,
+    hsv_v=0.0,
     translate=0.15,
     scale=0.3,
     degrees=10,
     erasing=0,
     fliplr=0.5,
+    focal_loss=1.5,
+    focal_loss_alpha=0.25,
 )
 
 # Secondary classifier on STATIC crops. Colour here is genuine appearance, so
