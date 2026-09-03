@@ -10,6 +10,7 @@ from tkinter import ttk
 
 import cv2
 import numpy as np
+from crops import crop_with_margin
 from index_annotations import AnnotationIndex
 from PIL import Image, ImageTk
 
@@ -78,7 +79,7 @@ lum_weight = params.get("lum_weight", 0.7)
 rgb_multipliers = params.get("rgb_multipliers", [1.0, 1.0, 1.0])
 motion_threshold = params.get("motion_threshold", 0)
 chromatic_tail_only = params.get("chromatic_tail_only", "false")
-
+secondary_crop_margin = params.get("secondary_crop_margin", 0.2)
 
 # Basic validation
 if len(primary_motion_classes) > len(primary_motion_colors) or len(
@@ -1417,7 +1418,14 @@ def save_annotation_and_overwrite_current():
                     os.makedirs(m_dir, exist_ok=True)
                     m_path = os.path.join(m_dir, fname)
                     try:
-                        crop = motion_ann_frame[y1_b:y2_b, x1_b:x2_b]
+                        crop = crop_with_margin(
+                            motion_ann_frame,
+                            x1_b,
+                            y1_b,
+                            x2_b,
+                            y2_b,
+                            secondary_crop_margin,
+                        )
                         if hasattr(crop, "size") and crop.size:
                             cv2.imwrite(m_path, crop)
                             created_crops.add(m_path)
@@ -1431,7 +1439,14 @@ def save_annotation_and_overwrite_current():
                     os.makedirs(s_dir, exist_ok=True)
                     s_path = os.path.join(s_dir, fname)
                     try:
-                        crop = static_ann_frame[y1_b:y2_b, x1_b:x2_b]
+                        crop = crop_with_margin(
+                            static_ann_frame,
+                            x1_b,
+                            y1_b,
+                            x2_b,
+                            y2_b,
+                            secondary_crop_margin,
+                        )
                         if hasattr(crop, "size") and crop.size:
                             cv2.imwrite(s_path, crop)
                             created_crops.add(s_path)

@@ -60,6 +60,7 @@ import sys
 import time
 
 import cv2
+from crops import crop_with_margin
 from motion import advance_history, compose_motion_image
 
 # optional GUI prompt if INI not supplied
@@ -473,25 +474,9 @@ def regenerate_crops_for_frame(
             continue
 
         bx1, by1, bx2, by2 = best
-        bw = bx2 - bx1
-        bh = by2 - by1
-
-        # Apply secondary_crop_margin expansion
-        mx = int(bw * margin)
-        my = int(bh * margin)
-
-        x1 = max(0, bx1 - mx)
-        y1 = max(0, by1 - my)
-        x2 = min(img_w, bx2 + mx)
-        y2 = min(img_h, by2 + my)
-
-        if x2 <= x1 or y2 <= y1:
+        crop = crop_with_margin(final_img, bx1, by1, bx2, by2, margin)
+        if crop is None:
             stale.append((crop_path, "matched box is empty after clipping"))
-            continue
-
-        crop = final_img[y1:y2, x1:x2]
-        if crop.size == 0:
-            stale.append((crop_path, "crop region is empty"))
             continue
 
         cv2.imwrite(crop_path, crop)

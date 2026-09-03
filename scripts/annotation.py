@@ -51,6 +51,7 @@ from tkinter import filedialog, ttk
 
 import cv2
 import numpy as np
+from crops import crop_with_margin
 from index_annotations import AnnotationIndex
 from motion import advance_history, compose_motion_image
 from PIL import Image, ImageTk
@@ -113,6 +114,7 @@ lum_weight = params.get("lum_weight", 0.7)
 rgb_multipliers = params.get("rgb_multipliers", [1.0, 1.0, 1.0])
 motion_threshold = params.get("motion_threshold", 0)
 chromatic_tail_only = params.get("chromatic_tail_only", "false")
+secondary_crop_margin = params.get("secondary_crop_margin", 0.2)
 
 # ----------------------------------------------------------------------------
 # Validate crop base directories exist; create if missing (annotator will write crops)
@@ -947,8 +949,10 @@ def save_annotation():
                 continue
 
             # ----- Motion crop -----
-            motion_crop = motion_ann_frame[y1:y2, x1:x2]
-            if motion_crop.size == 0:
+            motion_crop = crop_with_margin(
+                motion_ann_frame, x1, y1, x2, y2, secondary_crop_margin
+            )
+            if motion_crop is None:
                 continue
 
             primary_class_name = primary_classes[primary_cls]
@@ -964,8 +968,10 @@ def save_annotation():
             cv2.imwrite(crop_path, motion_crop)
 
             # ----- Static crop -----
-            static_crop = static_ann_frame[y1:y2, x1:x2]
-            if static_crop.size == 0:
+            static_crop = crop_with_margin(
+                static_ann_frame, x1, y1, x2, y2, secondary_crop_margin
+            )
+            if static_crop is None:
                 continue
 
             static_class_dir = os.path.join(
