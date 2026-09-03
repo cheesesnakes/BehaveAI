@@ -15,7 +15,7 @@ This script:
  - applies masks and blocking boxes in the same way as your annotator
  - re-cuts the secondary-classifier crops under annot_{static,motion}_crop/ from the
    regenerated frames, so the classifier and the detector stay in sync
- - moves anything it could not regenerate into annotations/_stale/
+ - moves anything it could not regenerate into annotations/_stale/ (skipping frames with '_bg_')
 
 Crop regeneration
 -----------------
@@ -139,6 +139,11 @@ def load_config(config_path):
             config["DEFAULT"].get("save_empty_frames", "false").lower()
         )
 
+        # Read crop margin setting (defaulting to 0.2 if missing)
+        params["secondary_crop_margin"] = float(
+            config["DEFAULT"].get("secondary_crop_margin", "0.2")
+        )
+
         # --- Read crop base directories (new) ---
         params["static_cropped_base_dir"] = resolve_project_path(
             project_dir,
@@ -188,7 +193,14 @@ def quarantine(path, reason, stats):
     """
     Move one stale file into annotations/_stale/, preserving its path below
     annotations/. Never deletes; on name collision, appends a counter.
+    Ignores files containing '_bg_' in their name.
     """
+    # Do not quarantine frames with _bg_ in their filename
+    filename = os.path.basename(path)
+    if "_bg_" in filename:
+        print(f"  SKIPPING QUARANTINE (_bg_ frame): {path} — {reason}")
+        return
+
     stats["count"] += 1
     if not os.path.exists(path):
         return
@@ -429,9 +441,11 @@ def regenerate_crops_for_frame(
     img_w,
     img_h,
     stream_name,
+    margin=0.0,
 ):
     """
     Re-cut every indexed crop for one frame from a freshly generated image.
+    Applies margin expanding around the box dimensions.
     """
     entries = crop_index.get((video_name, frame_num), [])
     if not entries or final_img is None:
@@ -458,9 +472,19 @@ def regenerate_crops_for_frame(
             stale.append((crop_path, f"no box within {CORNER_TOL}px of ({cx1},{cy1})"))
             continue
 
-        x1, y1, x2, y2 = best
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(img_w, x2), min(img_h, y2)
+        bx1, by1, bx2, by2 = best
+        bw = bx2 - bx1
+        bh = by2 - by1
+
+        # Apply secondary_crop_margin expansion
+        mx = int(bw * margin)
+        my = int(bh * margin)
+
+        x1 = max(0, bx1 - mx)
+        y1 = max(0, by1 - my)
+        x2 = min(img_w, bx2 + mx)
+        y2 = min(img_h, by2 + my)
+
         if x2 <= x1 or y2 <= y1:
             stale.append((crop_path, "matched box is empty after clipping"))
             continue
@@ -489,14 +513,16 @@ def regenerate_annotations(config_path):
     project_dir = os.path.dirname(os.path.abspath(config_path))
     os.chdir(project_dir)
 
-    # Extract crop base directories from params (now available)
+    # Extract crop base directories and margin from params
     static_crop_base = params["static_cropped_base_dir"]
     motion_crop_base = params["motion_cropped_base_dir"]
+    margin = params.get("secondary_crop_margin", 0.0)
 
     print(f"Regenerating using INI: {config_path}")
     print(f"Using clips directory: {clips_dir}")
     print(f"Static crop base: {static_crop_base}")
     print(f"Motion crop base: {motion_crop_base}")
+    print(f"Secondary crop margin: {margin}")
     if not QUARANTINE_STALE:
         print("Quarantine disabled — stale files will be reported, not moved.")
 
@@ -639,7 +665,7 @@ def regenerate_annotations(config_path):
                 continue
             seen.add(key)
             r, stale = regenerate_crops_for_frame(
-                video_name, frame_num, final_img, lbl, idx, img_w, img_h, stream
+                video_name, frame_num, final_img, lbl, idx, img_w, img_h, stream, margin
             )
             crops_done += r
             for path, reason in stale:
@@ -662,7 +688,7 @@ def regenerate_annotations(config_path):
                     stats,
                 )
 
-    # Sweep 2: images with no surviving label file (unchanged)
+    # Sweep 2: images with no surviving label file
     for base_dir in ("annot_static", "annot_motion"):
         for split in ("train", "val"):
             img_dir = os.path.join(ANNOT_ROOT, base_dir, "images", split)
