@@ -86,10 +86,8 @@ from scipy.optimize import linear_sum_assignment
 from ultralytics import YOLO
 
 # Optional — only needed when tracker_type != "builtin".
-try:
-    from boxmot_tracker import BoxMOTTracker
-except Exception:  # noqa: BLE001 - boxmot is an optional heavyweight dep
-    BoxMOTTracker = None
+from boxmot_tracker import BoxMOTTracker
+
 
 # Load all config into a single dict. See load_configs.py for keys.
 params = load_params()
@@ -1760,14 +1758,25 @@ def build_tracker(fps):
     eff_fps = (fps or 30.0) / (params["frame_skip"] + 1)
     tracker_type = params.get("tracker_type", "builtin")
 
-    if tracker_type != "builtin" and BoxMOTTracker is not None:
+    if tracker_type != "builtin":
         print(f"Using {tracker_type} tracker.")
-        # Every knob comes from the [tracker] INI section via
-        # params["tracker"]. Note that max_age is NOT delete_after_missed
-        # any more: that key belongs to the builtin tracker and was far too
-        # short for BoxMOT once the frame_rate/30 buffer scaling was
-        # applied on top of it.
-        return BoxMOTTracker.from_params(params, frame_rate=eff_fps)
+        # --- Instantiate the simplified BoxMOTTracker directly ---
+        tracker_cfg = params["tracker"]  # this dict holds all [tracker] settings
+        return BoxMOTTracker(
+            tracker_type=tracker_type,
+            class_names=params["primary_classes"],
+            frame_rate=eff_fps,
+            det_thresh=tracker_cfg.get("det_thresh", 0.25),
+            max_age=tracker_cfg.get("max_age", 45),
+            min_hits=tracker_cfg.get("min_hits", 3),
+            iou_threshold=tracker_cfg.get("iou_threshold", 0.20),
+            device=tracker_cfg.get("device", "cpu"),
+            half=tracker_cfg.get("half", False),
+            reid_weights=tracker_cfg.get("reid_weights", "osnet_x0_25_msmt17.pt"),
+            velocity_window=tracker_cfg.get("velocity_window", 5),
+            # Note: strict_kwargs and verbose are not in the simplified version
+            # but we can ignore them.
+        )
 
     if tracker_type != "builtin" and BoxMOTTracker is None:
         print(
