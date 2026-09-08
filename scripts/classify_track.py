@@ -94,7 +94,7 @@ params = load_params()
 
 # Image extensions recognised when counting dataset contents.
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
-PATIENCE = 20
+PATIENCE = params["patience"]
 
 # ============================================================================
 # STAGE 0 — Training hyperparameters, split by task
@@ -116,85 +116,89 @@ PATIENCE = 20
 #     stream sees real appearance, so mild colour jitter is fine (and helps).
 # ============================================================================
 
-DET_TRAIN_ARGS = dict(
-    # ----- Regularization (Adjusted for Detection) -----
-    weight_decay=0.0005,
-    dropout=0.0,
-    label_smoothing=0.1,
-    batch=16,
-    # ----- Optimizer -----
-    optimizer="AdamW",
-    lr0=0.001,
-    cos_lr=True,
-    # ----- Object-Specific Augmentations (The Magic) -----
-    copy_paste=0.3,
-    mixup=0.1,
-    # ----- Standard Augmentations -----
-    hsv_h=0.015,
-    hsv_s=0.7,
-    hsv_v=0.4,
-    translate=0.2,
-    scale=0.5,
-    degrees=10,
-    erasing=0.2,
-    fliplr=0.5,
-    # --- Loss Weights ---
-    box=7.5,
-    cls=0.5,
-    dfl=1.5,
-)
 
-# Secondary classifier on MOTION crops. Colour is the motion encoding, so
-# hue/saturation augmentation is off. Geometry jitter is kept small because a
-# behaviour crop is already tightly framed on the animal.
-CLS_TRAIN_ARGS_MOTION = dict(
-    dropout=0.2,
-    weight_decay=0.005,
-    batch=128,
-    optimizer="AdamW",
-    lr0=0.001,
-    cos_lr=True,
-    hsv_h=0.0,
-    hsv_s=0.0,
-    hsv_v=0.0,
-    translate=0.15,
-    scale=0.3,
-    degrees=10,
-    erasing=0,
-    fliplr=0.5,
-)
-
-# Secondary classifier on STATIC crops. Colour here is genuine appearance, so
-# normal photometric augmentation applies.
-CLS_TRAIN_ARGS_STATIC = dict(
-    dropout=0.2,
-    weight_decay=0.005,
-    batch=128,
-    optimizer="AdamW",
-    lr0=0.001,
-    cos_lr=True,
-    hsv_h=0.0,
-    hsv_s=0.0,
-    hsv_v=0.0,
-    translate=0.15,
-    scale=0.3,
-    degrees=10,
-    erasing=0,
-    fliplr=0.5,
-)
-
-
-def train_args_for(task, stream=None):
+def train_args_for(task, stream=None, params=None):
     """
-    Return a fresh copy of the training-argument block for a given task.
+    Return a fresh dict of training arguments for a given task and stream.
 
-    task   : "detect" (primary models) or "classify" (secondary models)
-    stream : "static" or "motion" — only consulted for classification.
+    task   : "detect" for primary detection models, "classify" for secondary.
+    stream : "motion" or "static" — only required for classification.
+    params : optional dict; if omitted, uses the global `params` variable.
+
+    All values are read from the `[tuning]` section of the INI file.
     """
+    if params is None:
+        # Fall back to the global `params` set by load_params()
+        params = globals().get("params")
+    if params is None:
+        raise RuntimeError("No params available – have you called load_params()?")
+
+    if task == "detect":
+        return {
+            "weight_decay": params["det_weight_decay"],
+            "dropout": params["det_dropout"],
+            "label_smoothing": params["det_label_smoothing"],
+            "batch": params["det_batch"],
+            "optimizer": params["det_optimizer"],
+            "lr0": params["det_lr0"],
+            "cos_lr": params["det_cos_lr"],
+            "copy_paste": params["det_copy_paste"],
+            "mixup": params["det_mixup"],
+            "hsv_h": params["det_hsv_h"],
+            "hsv_s": params["det_hsv_s"],
+            "hsv_v": params["det_hsv_v"],
+            "translate": params["det_translate"],
+            "scale": params["det_scale"],
+            "degrees": params["det_degrees"],
+            "erasing": params["det_erasing"],
+            "fliplr": params["det_fliplr"],
+            "box": params["det_box"],
+            "cls": params["det_cls"],
+            "dfl": params["det_dfl"],
+        }
+
     if task == "classify":
-        base = CLS_TRAIN_ARGS_MOTION if stream == "motion" else CLS_TRAIN_ARGS_STATIC
-        return dict(base)
-    return dict(DET_TRAIN_ARGS)
+        if stream == "motion":
+            return {
+                "batch": params["cls_motion_batch"],
+                "optimizer": params["cls_motion_optimizer"],
+                "lr0": params["cls_motion_lr0"],
+                "cos_lr": params["cls_motion_cos_lr"],
+                "weight_decay": params["cls_motion_weight_decay"],
+                "dropout": params["cls_motion_dropout"],
+                "label_smoothing": params["cls_motion_label_smoothing"],
+                "hsv_h": params["cls_motion_hsv_h"],
+                "hsv_s": params["cls_motion_hsv_s"],
+                "hsv_v": params["cls_motion_hsv_v"],
+                "translate": params["cls_motion_translate"],
+                "scale": params["cls_motion_scale"],
+                "degrees": params["cls_motion_degrees"],
+                "erasing": params["cls_motion_erasing"],
+                "fliplr": params["cls_motion_fliplr"],
+            }
+        elif stream == "static":
+            return {
+                "patience": params["cls_static_patience"],
+                "batch": params["cls_static_batch"],
+                "optimizer": params["cls_static_optimizer"],
+                "lr0": params["cls_static_lr0"],
+                "cos_lr": params["cls_static_cos_lr"],
+                "weight_decay": params["cls_static_weight_decay"],
+                "dropout": params["cls_static_dropout"],
+                "label_smoothing": params["cls_static_label_smoothing"],
+                "hsv_h": params["cls_static_hsv_h"],
+                "hsv_s": params["cls_static_hsv_s"],
+                "hsv_v": params["cls_static_hsv_v"],
+                "translate": params["cls_static_translate"],
+                "scale": params["cls_static_scale"],
+                "degrees": params["cls_static_degrees"],
+                "erasing": params["cls_static_erasing"],
+                "fliplr": params["cls_static_fliplr"],
+            }
+        else:
+            raise ValueError(f"Unknown stream '{stream}' for classification")
+
+    raise ValueError(f"Unknown task '{task}'")
 
 
 # ============================================================================
@@ -250,7 +254,18 @@ try:
 
             try:
                 dataset = loader.dataset
+                # Class cap
+                max_samples_per_class = params["secondary_max_samples"]
 
+                class_counts = {}
+                filtered_samples = []
+
+                for path, class_idx, posix, x in dataset.samples:
+                    class_counts[class_idx] = class_counts.get(class_idx, 0) + 1
+                    if class_counts[class_idx] <= max_samples_per_class:
+                        filtered_samples.append((path, class_idx, posix, x))
+
+                dataset.samples = filtered_samples
                 # torchvision-style ImageFolder tree: samples is a list of
                 # (path, class_index) pairs.
                 samples = getattr(dataset, "samples", None)

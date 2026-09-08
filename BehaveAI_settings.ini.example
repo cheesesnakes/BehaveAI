@@ -1,112 +1,402 @@
-; ---------------------------------------------------------------------------
-; Example configuration for a fish behaviour analysis pipeline
-; ---------------------------------------------------------------------------
+; ===========================================================================
+; BEHAVIOUR PIPELINE CONFIGURATION – Example for fish analysis
+; ===========================================================================
+;
+; This file controls all aspects of the pipeline:
+;   - Which object classes to detect and how to colour them
+;   - Which behaviour classes to classify (secondary motion)
+;   - Paths to input videos, output directories, and model files
+;   - Motion‑encoding strategy (colour from movement)
+;   - Training and inference settings for detection & classification
+;   - Tracking parameters (BoxMOT)
+;   - Fine‑tuning hyperparameters (augmentations, learning rates, etc.)
+;
+; Most values shown here are reasonable defaults; adjust them to your data.
 
 [DEFAULT]
-; ---------- Core class definitions ----------
-; Primary (detection) classes and their hotkeys / display colours
-primary_motion_classes   = fish
-primary_motion_hotkeys   = 1
-primary_motion_colors    = 0,220,255
 
-; Secondary (behaviour) classes – hotkeys and colours must match order
+; ---------------------------------------------------------------------------
+; 1. CLASS DEFINITIONS – primary detection, secondary behaviour, static species
+; ---------------------------------------------------------------------------
+
+; primary_motion_classes: The object classes that the detector will find.
+; Usually 'fish' – but could be multiple species if you train a multi‑class detector.
+primary_motion_classes   = fish
+
+; Hotkeys for manual annotation (1–9) – assign a unique key per class.
+primary_motion_hotkeys   = 1
+
+; Display colours (R,G,B) for each class (order must match classes).
+primary_motion_colors    = 0,220,255   ; cyan for fish
+
+; secondary_motion_classes: Behavioural states that will be classified
+; for each detected fish (e.g., moving, feeding, resting). The order here
+; must match the order of hotkeys and colours.
 secondary_motion_classes   = moving,vigilance,scanning,bite,chase,escape
+
+; One hotkey per behaviour class (2–9 normally).
 secondary_motion_hotkeys   = 2,3,4,5,6,7
+
+; Semicolon‑separated RGB triples; each matches a class above.
 secondary_motion_colors    = 0,255,97;236,255,0;255,188,0;255,97,97;255,62,190;200,200,200
 
-; Static (species) classification – 0 means “none”
-primary_static_classes     = fish
-primary_static_hotkeys     = 8
-primary_static_colors      = 200,200,200
+; primary_static_classes: Species (or individual identity) classification.
+; Usually 'fish' if you only have one species, or list species names.
+primary_static_classes   = fish
+primary_static_hotkeys   = 8
+primary_static_colors    = 200,200,200   ; grey
+
+; secondary_static_classes: Rarely used; you can leave as '0' (none).
 secondary_static_classes   = 0
 secondary_static_hotkeys   = 0
 secondary_static_colors    = 0
 
-ignore_secondary =          ; (optional) list of classes to ignore
+; ignore_secondary: Comma‑separated list of behaviour classes to exclude
+; from training (they will still be shown in the annotation tool).
+ignore_secondary =          ; e.g., chase,escape if you only care about 4 classes
 
-; ---------- File system ----------
-clips_dir   = /path/to/clips
-input_dir   = /path/to/input/videos
-output_dir  = /path/to/output/results
+; ---------------------------------------------------------------------------
+; 2. FILE SYSTEM PATHS
+; ---------------------------------------------------------------------------
 
-; ---------- Processing flags ----------
+clips_dir  = /path/to/clips     ; where raw video clips are stored
+input_dir  = /path/to/input/videos   ; where pipeline reads video files
+output_dir = /path/to/output/results ; where annotated frames, crops, logs go
+
+; ---------------------------------------------------------------------------
+; 3. GENERAL PROCESSING FLAGS
+; ---------------------------------------------------------------------------
+
+; motion_blocks_static: If true, motion‑based annotations (from colour‑from‑motion)
+; will overwrite static (species) labels. Set false to keep both.
 motion_blocks_static = false
+
+; static_blocks_motion: Similarly, if true, static labels block motion labels.
 static_blocks_motion = false
+
+; save_empty_frames: Save frames even when no detection is present.
+; Useful for validating negative examples.
 save_empty_frames    = true
-dominant_source      = confidence   ; confidence | detection | motion
+
+; dominant_source: When both motion and static labels exist, which takes priority?
+; Options: 'confidence' (use higher confidence), 'detection' (always detection),
+; or 'motion' (always motion). 'confidence' is usually best.
+dominant_source      = confidence
+
+; scale_factor: Rescale images before processing (e.g., 0.5 to halve resolution).
 scale_factor         = 1.0
+
+; line_thickness: Thickness of bounding boxes and annotation lines (pixels).
 line_thickness       = 1
+
+; font_size: Size of text labels on annotated frames.
 font_size            = 0.6
 
-; ---------- Validation split ----------
+; val_frequency: Fraction of annotated frames to hold out as a validation set
+; during training (0.2 = 20%).
 val_frequency = 0.2
 
-; ---------- Motion‑colour encoding ----------
-strategy             = exponential   ; exponential | sequential
-chromatic_tail_only  = false
-expA                 = 0.67          ; green buffer retention
-expB                 = 0.86          ; red buffer retention
-lum_weight           = 0.3
-rgb_multipliers      = 4,4,4         ; red,green,blue gain
-motion_threshold     = 0
-frame_skip           = 1             ; process every (skip+1)th raw frame
+; ---------------------------------------------------------------------------
+; 4. COLOUR‑FROM‑MOTION ENCODING
+; ---------------------------------------------------------------------------
+; This section controls how motion is visualised as colour trails.
+; The pipeline builds three buffers (blue, green, red) using exponential
+; moving averages (EMA) to create a heat‑map‑like trail behind moving objects.
 
-; ---------- Models & training ----------
-primary_classifier            = yolo26m.pt
-primary_epochs                = 300
-primary_imgsz                 = 1280
-secondary_classifier          = yolo26s-cls.pt
-secondary_epochs              = 300
-secondary_imgsz               = 320
-use_ncnn                      = false
-inference_imgsz               = 1280
-train_batch                   = 16
-train_device                  = 0
-primary_conf_thresh           = 0.25
-secondary_conf_thresh         = 0.25
-primary_static_external_model = /path/to/species_model.pt
+; strategy: 'exponential' gives a smooth fade‑out; 'sequential' gives discrete
+; ghost frames (like multiple exposures). 'exponential' is more natural.
+strategy = exponential
+
+; chromatic_tail_only: If true, removes the leading white edge and only
+; keeps the coloured tail. Set false to preserve static luminance in the trail.
+chromatic_tail_only = false
+
+; expA and expB: EMA decay factors for green (expA) and red (expB) buffers.
+; Higher values = longer trails. The blue buffer always decays over 1 frame.
+; Typical: expA=0.67 (short memory), expB=0.86 (long memory) for a rainbow tail.
+expA = 0.67
+expB = 0.86
+
+; lum_weight: Weight of the raw grayscale image blended into the output.
+; Adds spatial context. 0.3 means 30% luminance, 70% motion colour.
+lum_weight = 0.3
+
+; rgb_multipliers: Per‑channel gain applied to each colour (R,G,B).
+; Increase to amplify colour intensity, but watch for saturation.
+; 4,4,4 is a safe boost.
+rgb_multipliers = 4,4,4
+
+; motion_threshold: Noise floor subtracted after gain. Effective floor is
+; threshold / rgb_multiplier. Increase to reduce noise in low‑motion regions.
+; 5 works well for most footage.
+motion_threshold = 5
+
+; frame_skip: Process every (skip+1)‑th raw frame. 1 = process every frame.
+frame_skip = 1
+
+; ---------------------------------------------------------------------------
+; 5. MODELS AND TRAINING
+; ---------------------------------------------------------------------------
+
+; primary_classifier: YOLO detection model (weights file). Use a .pt file.
+primary_classifier   = yolo26s.pt      ; 's' for small, 'm' for medium, etc.
+
+; primary_epochs: Number of training epochs for the detector.
+primary_epochs       = 300
+
+; primary_imgsz: Input image size for detection training (must be multiple of 32).
+primary_imgsz        = 1280
+
+; secondary_classifier: YOLO classification model for behaviour classification.
+secondary_classifier = yolo26n-cls.pt  ; 'n' for nano, 's' for small
+
+; secondary_epochs: Training epochs for the behaviour classifier.
+secondary_epochs     = 300
+
+; secondary_imgsz: Input crop size for behaviour classification.
+; Smaller = faster, but may lose detail; 224 is common for classification.
+secondary_imgsz      = 224
+
+; use_ncnn: Set true to use NCNN (mobile‑optimised) inference; false for PyTorch.
+use_ncnn = false
+
+; inference_imgsz: Resolution used at inference time. Should match primary_imgsz
+; unless you have a reason (e.g., you trained at 1280 but want faster inference
+; by reducing at runtime – not recommended).
+inference_imgsz = 1280
+
+; train_batch: Batch size for training (detection and classification).
+train_batch  = 16
+
+; train_device: GPU device index (0 for first GPU, 'cpu' for CPU).
+train_device = 0
+
+; primary_conf_thresh: Minimum confidence score for a detection to be kept.
+; Lower = more detections (but more false positives). 0.5 is a good balance.
+primary_conf_thresh   = 0.5
+
+; secondary_conf_thresh: Same for behaviour classification.
+secondary_conf_thresh = 0.5
+
+; primary_static_external_model: Path to a pre‑trained species (static) model.
+; If provided, it will be used for static classification.
+primary_static_external_model   = /path/to/species_model.pt
+
+; secondary_static_external_model: Pre‑trained behaviour model (if you have one).
 secondary_static_external_model = /path/to/behaviour_model.pt
+
+; primary_static_pseudo_labeling: If true, the external model will generate
+; pseudo‑labels to train a local model (useful for fine‑tuning on your data).
+; false means use the external model directly.
 primary_static_pseudo_labeling = false
 
-; ---------- Detection merging & tracking ----------
+; ---------------------------------------------------------------------------
+; 6. DETECTION MERGING & TRACKING (shared between streams, builtin tracker)
+; ---------------------------------------------------------------------------
+; These parameters are used when merging detections from multiple sources
+; (e.g., motion vs static) and for the built‑in (non‑BoxMOT) tracker.
+
+; centroid_merge_thresh: Maximum Euclidean distance between centroids to
+; consider them the same object (for merging detections). In pixels.
 centroid_merge_thresh = 100
-iou_thresh            = 0.5
+
+; iou_thresh: Intersection‑over‑Union threshold for merging boxes.
+; 0.4 means boxes with >40% overlap are merged.
+iou_thresh            = 0.4
+
+; match_distance_thresh: Maximum distance (in pixels) for associating
+; a detection with an existing track (built‑in tracker).
 match_distance_thresh = 100
+
+; delete_after_missed: Frames to keep a track alive without a detection
+; before deleting it (for built‑in tracker).
 delete_after_missed   = 5
 
-; ---------- Secondary classifier data staging ----------
-secondary_val_fraction       = 0.2
-secondary_split_seed         = 0
-secondary_ignore_subclasses  = chase,escape
-secondary_video_regex        = ^(.*?)(?:_id\d+|_frame\d+|_track\d+)
-secondary_sampler_power      = 0.5
-secondary_crop_margin        = 0.0
-
-
 ; ---------------------------------------------------------------------------
-; [tracker] – settings for the tracking backend (BoxMOT)
+; 7. SECONDARY CLASSIFIER – STAGING, BALANCING, CROP FRAMING
 ; ---------------------------------------------------------------------------
+; These settings control how training data for the behaviour classifier is
+; prepared, balanced, and cropped.
+
+; secondary_val_fraction: Fraction of each behaviour class held out for validation.
+secondary_val_fraction = 0.1
+
+; secondary_split_seed: Fixed random seed for reproducible data splits.
+secondary_split_seed = 0
+
+; secondary_ignore_subclasses: Classes to exclude from training (but still
+; present in annotations). Useful to omit rare or ambiguous behaviours.
+secondary_ignore_subclasses = chase,escape
+
+; secondary_video_regex: Regex to extract a video ID from a crop filename.
+; Used to split by video (ensuring no video appears in both train and val).
+; The default matches the pattern before '_id...' or '_frame...' etc.
+secondary_video_regex = ^(.*?)(?:_id\d+|_frame\d+|_track\d+)
+
+; secondary_sampler_power: Exponent for inverse class frequency weighting.
+; 0.5 = square‑root inverse, 0 = uniform, 1 = full inverse.
+; Helps balance rare classes.
+secondary_sampler_power = 0.8
+
+; secondary_crop_margin: Fractional margin added around each detection box
+; when extracting a crop for behaviour classification. 0.2 = add 20% padding.
+; Helps the classifier see context.
+secondary_crop_margin = 0.2
+
+; ===========================================================================
+; [tracker] – BOXMOT TRACKER SETTINGS (deepocsort recommended for fish)
+; ===========================================================================
+; BoxMOT is a modern tracking library; deepocsort is particularly good for
+; fish because it uses Re‑ID features and handles occlusion well.
+
 [tracker]
-tracker_type     = ocsort        ; ocsort | bytetrack | botsort | …
-det_conf_floor   = 0.05          ; confidence used to run the detector
-det_thresh       = 0.15          ; tracker’s own high/low confidence split
-max_age          = 45            ; frames to keep a track without a match
-min_hits         = 2             ; minimum detections to output a track
-iou_threshold    = 0.20          ; association IoU gate (looser for fish)
+
+; tracker_type: Which tracker to use. Options: deepocsort, ocsort, bytetrack,
+; botsort, etc. deepocsort is recommended for fish (with Re‑ID).
+tracker_type     = deepocsort
+
+; det_conf_floor: Minimum detection confidence to even consider using the
+; detector's output for tracking (lower than det_thresh allows weaker detections).
+det_conf_floor   = 0.05
+
+; det_thresh: Confidence threshold used internally by the tracker to split
+; detections into high‑ and low‑score groups (used in some trackers).
+det_thresh       = 0.5
+
+; max_age: Maximum number of frames a track can be lost before it is dropped.
+; Fish can disappear for a while; 90 frames (≈3s at 30fps) is a good start.
+max_age          = 90
+
+; min_hits: Minimum number of detections needed to start a new track.
+; 2 reduces false tracks from sporadic detections.
+min_hits         = 2
+
+; iou_threshold: IoU threshold for associating detections with tracks.
+; Fish are often elongated; a looser threshold (0.20) helps with partial overlap.
+iou_threshold    = 0.20
+
+; per_class: If true, track each class separately (useful for multi‑species).
 per_class        = false
+
+; device: Which device to run the tracker on ('cuda:0' or 'cpu').
 device           = cuda:0
+
+; half: Use half‑precision (FP16) for Re‑ID model (faster, slightly less accurate).
 half             = false
-reid_weights     = osnet_x0_25_msmt17.pt   ; only for ReID‑based trackers
+
+; reid_weights: Path to Re‑ID model weights (only used by deepocsort/botsort).
+; osnet_x0_25_msmt17.pt is a lightweight, fast model.
+reid_weights     = osnet_x0_25_msmt17.pt
+
+; velocity_window: Number of past frames to use for velocity estimation.
+; 5 is typical.
 velocity_window  = 5
+
+; strict_kwargs: If true, the tracker will raise errors for unknown arguments.
+; Keep true for debugging.
 strict_kwargs    = true
+
+; verbose: Print tracking logs to console.
 verbose          = true
 
-; ---------------------------------------------------------------------------
-; [kalman] – settings for the built‑in (non‑BoxMOT) tracker
-; ---------------------------------------------------------------------------
+; ===========================================================================
+; [kalman] – BUILT‑IN KALMAN FILTER SETTINGS (used only when tracker_type = builtin)
+; ===========================================================================
+; These parameters only apply if you set tracker_type = builtin (not BoxMOT).
+; You can ignore them if you use BoxMOT.
+
 [kalman]
+
+; process_noise_pos: Process noise for position (how much we trust the motion model).
 process_noise_pos   = 0.01
+
+; process_noise_vel: Process noise for velocity.
 process_noise_vel   = 0.1
+
+; measurement_noise: Noise in the measurements (detections).
 measurement_noise   = 0.5
+
+; tracker_iou_weight: Weight given to IoU when associating detections to tracks.
 tracker_iou_weight  = 0.4
+
+; tracker_class_penalty: Penalty applied when class IDs differ; higher = more
+; penalty, discouraging class changes.
 tracker_class_penalty = 2.0
+
+; ===========================================================================
+; [tuning] – TRAINING HYPERPARAMETERS FOR DETECTION AND CLASSIFICATION
+; ===========================================================================
+; This section contains all the low‑level training arguments, including
+; augmentations, optimiser settings, and loss weights. These are passed to
+; the YOLO trainer.
+
+[tuning]
+
+patience = 20
+
+; secondary_max_samples: Maximum number of samples (crops) to use for the
+; secondary (behaviour) classifier training. Helps balance dataset size.
+secondary_max_samples = 2500
+
+; --- Primary detection (DET_TRAIN_ARGS) ---
+; These affect the object detector (YOLO).
+
+det_weight_decay = 0.0005          ; L2 regularisation strength
+det_dropout = 0.0                  ; Dropout rate (not used in YOLO by default)
+det_label_smoothing = 0.1          ; Label smoothing to prevent overconfidence
+det_batch = 16                     ; Batch size (overrides general train_batch)
+det_optimizer = AdamW              ; Optimiser (AdamW, SGD, etc.)
+det_lr0 = 0.001                    ; Initial learning rate
+det_cos_lr = true                  ; Use cosine annealing scheduler
+det_copy_paste = 0.3               ; Probability of copy‑paste augmentation
+det_mixup = 0.1                    ; Probability of mixup augmentation
+det_hsv_h = 0.015                  ; Hue augmentation max shift (fraction)
+det_hsv_s = 0.4                    ; Saturation augmentation max shift
+det_hsv_v = 0.4                    ; Value (brightness) augmentation max shift
+det_translate = 0.2                ; Translation augmentation (fraction of image)
+det_scale = 0.5                    ; Scale augmentation (zoom) range
+det_degrees = 10                   ; Rotation augmentation (degrees)
+det_erasing = 0.2                  ; Random erasing probability
+det_fliplr = 0.5                   ; Horizontal flip probability
+det_box = 7.5                      ; Box loss gain
+det_cls = 0.5                      ; Classification loss gain
+det_dfl = 1.5                      ; Distribution Focal Loss gain
+
+; --- Motion classifier (CLS_TRAIN_ARGS_MOTION) ---
+; These affect the behaviour classifier (secondary_motion).
+
+cls_motion_batch = 16
+cls_motion_optimizer = AdamW
+cls_motion_lr0 = 0.0001            ; Lower LR for classification (fine‑tuning)
+cls_motion_cos_lr = true
+cls_motion_weight_decay = 0.01
+cls_motion_dropout = 0.25
+cls_motion_label_smoothing = 0.05
+cls_motion_hsv_h = 0.0             ; No hue shift for behaviour (keep colour info)
+cls_motion_hsv_s = 0.3
+cls_motion_hsv_v = 0.3
+cls_motion_translate = 0.1
+cls_motion_scale = 0.3
+cls_motion_degrees = 10
+cls_motion_erasing = 0.1
+cls_motion_fliplr = 0.5
+
+; --- Static classifier (CLS_TRAIN_ARGS_STATIC) ---
+; These affect the species/static classifier.
+
+cls_static_patience = 15           ; Early stopping patience (epochs without improvement)
+cls_static_batch = 32
+cls_static_optimizer = AdamW
+cls_static_lr0 = 0.0005
+cls_static_cos_lr = true
+cls_static_weight_decay = 0.005
+cls_static_dropout = 0.2
+cls_static_label_smoothing = 0.1
+cls_static_hsv_h = 0.015
+cls_static_hsv_s = 0.7
+cls_static_hsv_v = 0.4
+cls_static_translate = 0.2
+cls_static_scale = 0.5
+cls_static_degrees = 15
+cls_static_erasing = 0.2
+cls_static_fliplr = 0.5

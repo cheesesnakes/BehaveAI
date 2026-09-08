@@ -675,6 +675,88 @@ def read_parameters():
         else:
             params["detector_conf_thresh"] = params["primary_conf_thresh"]
 
+        # ---- tuning block --------------------------------------------
+        params["secondary_max_samples"] = float(
+            config["tuning"].get("secondary_max_samples", 1000)
+        )
+        params["patience"] = float(config["tuning"].get("patience", 20))
+        # ---- Primary detection (DET_TRAIN_ARGS) ----
+        tuning = config["tuning"] if config.has_section("tuning") else {}
+        params["det_weight_decay"] = float(tuning.get("det_weight_decay", "0.0005"))
+        params["det_dropout"] = float(tuning.get("det_dropout", "0.0"))
+        params["det_label_smoothing"] = float(tuning.get("det_label_smoothing", "0.1"))
+        params["det_batch"] = int(tuning.get("det_batch", "16"))
+        params["det_optimizer"] = tuning.get("det_optimizer", "AdamW").strip()
+        params["det_lr0"] = float(tuning.get("det_lr0", "0.001"))
+        params["det_cos_lr"] = _cfg_bool(tuning.get("det_cos_lr", "true"), True)
+        params["det_copy_paste"] = float(tuning.get("det_copy_paste", "0.3"))
+        params["det_mixup"] = float(tuning.get("det_mixup", "0.1"))
+        params["det_hsv_h"] = float(tuning.get("det_hsv_h", "0.015"))
+        params["det_hsv_s"] = float(tuning.get("det_hsv_s", "0.4"))
+        params["det_hsv_v"] = float(tuning.get("det_hsv_v", "0.4"))
+        params["det_translate"] = float(tuning.get("det_translate", "0.2"))
+        params["det_scale"] = float(tuning.get("det_scale", "0.5"))
+        params["det_degrees"] = float(tuning.get("det_degrees", "10"))
+        params["det_erasing"] = float(tuning.get("det_erasing", "0.2"))
+        params["det_fliplr"] = float(tuning.get("det_fliplr", "0.5"))
+        params["det_box"] = float(tuning.get("det_box", "7.5"))
+        params["det_cls"] = float(tuning.get("det_cls", "0.5"))
+        params["det_dfl"] = float(tuning.get("det_dfl", "1.5"))
+
+        # ---- Motion classifier (CLS_TRAIN_ARGS_MOTION) ----
+        params["cls_motion_batch"] = int(tuning.get("cls_motion_batch", "16"))
+        params["cls_motion_optimizer"] = tuning.get(
+            "cls_motion_optimizer", "AdamW"
+        ).strip()
+        params["cls_motion_lr0"] = float(tuning.get("cls_motion_lr0", "0.0001"))
+        params["cls_motion_cos_lr"] = _cfg_bool(
+            tuning.get("cls_motion_cos_lr", "true"), True
+        )
+        params["cls_motion_weight_decay"] = float(
+            tuning.get("cls_motion_weight_decay", "0.01")
+        )
+        params["cls_motion_dropout"] = float(tuning.get("cls_motion_dropout", "0.25"))
+        params["cls_motion_label_smoothing"] = float(
+            tuning.get("cls_motion_label_smoothing", "0.05")
+        )
+        params["cls_motion_hsv_h"] = float(tuning.get("cls_motion_hsv_h", "0.0"))
+        params["cls_motion_hsv_s"] = float(tuning.get("cls_motion_hsv_s", "0.3"))
+        params["cls_motion_hsv_v"] = float(tuning.get("cls_motion_hsv_v", "0.3"))
+        params["cls_motion_translate"] = float(
+            tuning.get("cls_motion_translate", "0.1")
+        )
+        params["cls_motion_scale"] = float(tuning.get("cls_motion_scale", "0.3"))
+        params["cls_motion_degrees"] = float(tuning.get("cls_motion_degrees", "10"))
+        params["cls_motion_erasing"] = float(tuning.get("cls_motion_erasing", "0.1"))
+        params["cls_motion_fliplr"] = float(tuning.get("cls_motion_fliplr", "0.5"))
+
+        # ---- Static classifier (CLS_TRAIN_ARGS_STATIC) ----
+        params["cls_static_patience"] = int(tuning.get("cls_static_patience", "15"))
+        params["cls_static_batch"] = int(tuning.get("cls_static_batch", "32"))
+        params["cls_static_optimizer"] = tuning.get(
+            "cls_static_optimizer", "AdamW"
+        ).strip()
+        params["cls_static_lr0"] = float(tuning.get("cls_static_lr0", "0.0005"))
+        params["cls_static_cos_lr"] = _cfg_bool(
+            tuning.get("cls_static_cos_lr", "true"), True
+        )
+        params["cls_static_weight_decay"] = float(
+            tuning.get("cls_static_weight_decay", "0.005")
+        )
+        params["cls_static_dropout"] = float(tuning.get("cls_static_dropout", "0.2"))
+        params["cls_static_label_smoothing"] = float(
+            tuning.get("cls_static_label_smoothing", "0.1")
+        )
+        params["cls_static_hsv_h"] = float(tuning.get("cls_static_hsv_h", "0.015"))
+        params["cls_static_hsv_s"] = float(tuning.get("cls_static_hsv_s", "0.7"))
+        params["cls_static_hsv_v"] = float(tuning.get("cls_static_hsv_v", "0.4"))
+        params["cls_static_translate"] = float(
+            tuning.get("cls_static_translate", "0.2")
+        )
+        params["cls_static_scale"] = float(tuning.get("cls_static_scale", "0.5"))
+        params["cls_static_degrees"] = float(tuning.get("cls_static_degrees", "15"))
+        params["cls_static_erasing"] = float(tuning.get("cls_static_erasing", "0.2"))
+        params["cls_static_fliplr"] = float(tuning.get("cls_static_fliplr", "0.5"))
     except KeyError as e:
         raise KeyError(f"Missing configuration parameter: {e}")
 
