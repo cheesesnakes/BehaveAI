@@ -679,7 +679,7 @@ def read_parameters():
         params["secondary_max_samples"] = float(
             config["tuning"].get("secondary_max_samples", 1000)
         )
-        params["patience"] = float(config["tuning"].get("patience", 20))
+        params["patience"] = int(config["tuning"].get("patience", 20))
         # ---- Primary detection (DET_TRAIN_ARGS) ----
         tuning = config["tuning"] if config.has_section("tuning") else {}
         params["det_weight_decay"] = float(tuning.get("det_weight_decay", "0.0005"))

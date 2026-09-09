@@ -966,7 +966,11 @@ class SettingsEditorApp(tk.Tk):
         ).grid(row=3, column=1, sticky="w", padx=8)
 
         # Kalman subsection
-        ttk.Label(tab4, text="Kalman filter").grid(
+        # NOTE: these settings only take effect when [tracker] tracker_type is
+        # set to "builtin" — BoxMOT-backed trackers (e.g. ocsort) read their own
+        # settings from the [tracker] section, which is not exposed in this GUI
+        # and is preserved as-is on save.
+        ttk.Label(tab4, text="Kalman filter (builtin tracker only)").grid(
             row=4, column=0, sticky="w", padx=8, pady=(12, 0)
         )
         ttk.Label(tab4, text="Process noise position").grid(
@@ -980,7 +984,7 @@ class SettingsEditorApp(tk.Tk):
         ttk.Label(tab4, text="Process noise velocity").grid(
             row=6, column=0, sticky="w", padx=8
         )
-        self.kalman_vel_var = tk.DoubleVar(value=0.01)
+        self.kalman_vel_var = tk.DoubleVar(value=0.1)
         ttk.Entry(tab4, textvariable=self.kalman_vel_var).grid(
             row=6, column=1, sticky="w", padx=8
         )
@@ -988,7 +992,7 @@ class SettingsEditorApp(tk.Tk):
         ttk.Label(tab4, text="Measurement noise").grid(
             row=7, column=0, sticky="w", padx=8
         )
-        self.kalman_meas_var = tk.DoubleVar(value=0.2)
+        self.kalman_meas_var = tk.DoubleVar(value=0.5)
         ttk.Entry(tab4, textvariable=self.kalman_meas_var).grid(
             row=7, column=1, sticky="w", padx=8
         )
@@ -1151,6 +1155,9 @@ class SettingsEditorApp(tk.Tk):
         )
         self.secondary_epochs_var.set(int(d.get("secondary_epochs", fallback="100")))
         self.use_ncnn_var.set(self._str_to_bool(d.get("use_ncnn", fallback="false")))
+        self.pseudo_labeling_var.set(
+            self._str_to_bool(d.get("primary_static_pseudo_labeling", fallback="false"))
+        )
         self.primary_conf_var.set(float(d.get("primary_conf_thresh", fallback="0.5")))
         self.secondary_conf_var.set(
             float(d.get("secondary_conf_thresh", fallback="0.5"))
@@ -1176,15 +1183,15 @@ class SettingsEditorApp(tk.Tk):
                 float(ksec.get("process_noise_pos", fallback="0.01"))
             )
             self.kalman_vel_var.set(
-                float(ksec.get("process_noise_vel", fallback="0.01"))
+                float(ksec.get("process_noise_vel", fallback="0.1"))
             )
             self.kalman_meas_var.set(
-                float(ksec.get("measurement_noise", fallback="0.2"))
+                float(ksec.get("measurement_noise", fallback="0.5"))
             )
         else:
             self.kalman_pos_var.set(0.01)
-            self.kalman_vel_var.set(0.01)
-            self.kalman_meas_var.set(0.2)
+            self.kalman_vel_var.set(0.1)
+            self.kalman_meas_var.set(0.5)
 
         self._set_dirty(False)
 
@@ -1454,14 +1461,25 @@ class SettingsEditorApp(tk.Tk):
             )
             return
 
-        # ---- build a fresh DEFAULT dict from the current GUI state ----
+        path_error = self._validate_paths()
+        if path_error:
+            messagebox.showwarning("Invalid paths", path_error)
+            return
+
+        # ---- build a dict of only the DEFAULT keys this GUI manages ----
+        # Anything not listed here (e.g. save_empty_frames, scale_factor,
+        # motion_threshold, primary_imgsz/secondary_imgsz/inference_imgsz,
+        # train_batch, train_device, secondary_val_fraction, secondary_split_seed,
+        # secondary_ignore_subclasses, secondary_video_regex, secondary_sampler_power,
+        # secondary_crop_margin, or the [tracker] section) is left untouched below,
+        # per "don't add new fields to the settings dialogue".
         new_default = {}
 
         ignore_secondary_labels = []
 
         for key, _title in CLASS_GROUPS:
             editor = self.class_editors[key]
-            items = editor.get()  # now list of (label, hotkey, (r,g,b), ignore_flag)
+            items = editor.get()  # list of (label, hotkey, (r,g,b), ignore_flag)
             labels = []
             hks = []
             cols = []
@@ -1490,12 +1508,7 @@ class SettingsEditorApp(tk.Tk):
         new_default["static_blocks_motion"] = str(
             self.static_blocks_motion_var.get()
         ).lower()
-        new_default["ignore_secondary"] = (
-            ""  # preserve empty default unless you expose it in GUI
-        )
-        new_default["save_empty_frames"] = "true"  # preserve default unless exposed
         new_default["dominant_source"] = self.dominant_source_var.get()
-        new_default["scale_factor"] = "1.0"
         new_default["line_thickness"] = str(self.line_thickness_var.get())
         new_default["font_size"] = str(self.font_size_var.get())
         new_default["val_frequency"] = str(self.val_frequency_var.get())
@@ -1510,7 +1523,6 @@ class SettingsEditorApp(tk.Tk):
         new_default["lum_weight"] = str(self.lum_weight_var.get())
         new_default["rgb_multipliers"] = self.rgb_mult_var.get()
         new_default["frame_skip"] = str(self.frame_skip_var.get())
-        # ~ new_default['scale_factor'] = str(self.scale_factor_var.get())
 
         # model type
         new_default["primary_classifier"] = self.primary_classifier_var.get()
@@ -1526,44 +1538,30 @@ class SettingsEditorApp(tk.Tk):
         )
 
         # pseudo labeling
-        new_default["primary_static_pseudo_labeling"] = self.pseudo_labeling_var.get()
+        new_default["primary_static_pseudo_labeling"] = str(
+            self.pseudo_labeling_var.get()
+        ).lower()
 
-        # tracking
+        # tracking (builtin/shared merge+track settings)
         new_default["match_distance_thresh"] = str(self.match_distance_var.get())
         new_default["delete_after_missed"] = str(self.delete_after_var.get())
         new_default["centroid_merge_thresh"] = str(self.centroid_merge_var.get())
         new_default["iou_thresh"] = str(self.iou_var.get())
 
-        # ---- write kalman section (unchanged logic) ----
+        # ---- merge managed keys into existing defaults, preserving anything
+        # already in the file that the GUI doesn't expose (see comment above) ----
+        for k, v in new_default.items():
+            self.cfg._defaults[k] = v
+
+        # ---- write kalman section (only the 3 fields this GUI exposes; any
+        # other keys already in [kalman], e.g. tracker_iou_weight,
+        # tracker_class_penalty, are left as-is since we mutate in place) ----
         if "kalman" not in self.cfg:
             self.cfg["kalman"] = {}
         k = self.cfg["kalman"]
         k["process_noise_pos"] = str(self.kalman_pos_var.get())
         k["process_noise_vel"] = str(self.kalman_vel_var.get())
         k["measurement_noise"] = str(self.kalman_meas_var.get())
-
-        ignore_secondary = []
-
-        for key, editor in self.class_editors.items():
-            labels, hotkeys, colors = [], [], []
-
-            for label, hk, col, ignore_sec in editor.get():
-                if not label:
-                    continue
-
-                labels.append(label)
-                hotkeys.append(hk)
-                colors.append(col)
-
-                if key.startswith("primary") and ignore_sec:
-                    ignore_secondary.append(label)
-
-        new_default["ignore_secondary"] = ",".join(ignore_secondary)
-
-        path_error = self._validate_paths()
-        if path_error:
-            messagebox.showwarning("Invalid paths", path_error)
-            return
 
         # Determine if we should prompt for regeneration AFTER saving:
         should_prompt_regen = False
@@ -1576,12 +1574,8 @@ class SettingsEditorApp(tk.Tk):
             # conservative: prompt if unsure
             should_prompt_regen = True
 
-        # ---- atomically replace defaults and write file ----
+        # ---- write file ----
         try:
-            # Replace defaults atomically
-            self.cfg._defaults.clear()
-            self.cfg._defaults.update(new_default)
-
             with open(self.ini_path, "w") as f:
                 self.cfg.write(f)
 
