@@ -680,6 +680,26 @@ def read_parameters():
             config["tuning"].get("secondary_max_samples", 1000)
         )
         params["patience"] = int(config["tuning"].get("patience", 20))
+        # ---- patience values for each model type ----
+        # primary detectors
+        params["primary_static_patience"] = int(
+            config["tuning"].get("primary_static_patience", params["patience"])
+        )
+        params["primary_motion_patience"] = int(
+            config["tuning"].get("primary_motion_patience", params["patience"])
+        )
+
+        # secondary classifiers
+        # reuse existing cls_static_patience if present, else fallback to new key or global
+        params["secondary_static_patience"] = int(
+            config["tuning"].get(
+                "secondary_static_patience",
+                config["tuning"].get("cls_static_patience", params["patience"]),
+            )
+        )
+        params["secondary_motion_patience"] = int(
+            config["tuning"].get("secondary_motion_patience", params["patience"])
+        )
         # ---- Primary detection (DET_TRAIN_ARGS) ----
         tuning = config["tuning"] if config.has_section("tuning") else {}
         params["det_weight_decay"] = float(tuning.get("det_weight_decay", "0.0005"))

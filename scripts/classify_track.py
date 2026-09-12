@@ -47,7 +47,7 @@ typical). Two mechanisms address that here:
 
     * Training hyperparameters are chosen per TASK rather than shared with
       the detectors. See DET_TRAIN_ARGS / CLS_TRAIN_ARGS_* below; in
-      particular the motion classifier gets hue/saturation augmentation
+      particular the motion classifier gets hue/saturation
       disabled, because in a motion image the colour IS the signal.
 
 Tracking
@@ -94,7 +94,6 @@ params = load_params()
 
 # Image extensions recognised when counting dataset contents.
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
-PATIENCE = params["patience"]
 
 # ============================================================================
 # STAGE 0 — Training hyperparameters, split by task
@@ -118,20 +117,41 @@ PATIENCE = params["patience"]
 
 
 def train_args_for(task, stream=None, params=None):
-    """
-    Return a fresh dict of training arguments for a given task and stream.
-
-    task   : "detect" for primary detection models, "classify" for secondary.
-    stream : "motion" or "static" — only required for classification.
-    params : optional dict; if omitted, uses the global `params` variable.
-
-    All values are read from the `[tuning]` section of the INI file.
-    """
     if params is None:
-        # Fall back to the global `params` set by load_params()
         params = globals().get("params")
     if params is None:
-        raise RuntimeError("No params available – have you called load_params()?")
+        raise RuntimeError("No params available")
+
+    if task == "detect":
+        # detect: static vs motion
+        if stream == "static":
+            patience = params["primary_static_patience"]
+        elif stream == "motion":
+            patience = params["primary_motion_patience"]
+        else:
+            patience = params["patience"]  # fallback
+
+        return {
+            "patience": patience,
+            "weight_decay": params["det_weight_decay"],
+            # ... (all other existing detect args)
+        }
+
+    if task == "classify":
+        if stream == "static":
+            return {
+                "patience": params["secondary_static_patience"],
+                "batch": params["cls_static_batch"],
+                # ... (all other static classify args)
+            }
+        elif stream == "motion":
+            return {
+                "patience": params["secondary_motion_patience"],
+                "batch": params["cls_motion_batch"],
+                # ... (all other motion classify args)
+            }
+        else:
+            raise ValueError(f"Unknown stream '{stream}' for classification")
 
     if task == "detect":
         return {
@@ -964,9 +984,9 @@ def maybe_retrain(
                 project=project_path,
                 name="train",
                 exist_ok=True,
+                cls_pw=0.25,
                 # --- Core Training ---
                 device=params["train_device"],
-                patience=PATIENCE,
                 # --- Task-specific optimizer / augmentation / loss block ---
                 **extra,
             )
@@ -1012,9 +1032,9 @@ def maybe_retrain(
             project=project_path,
             name="train",
             exist_ok=True,
+            cls_pw=0.25,
             # --- Core Training ---
             device=params["train_device"],
-            patience=PATIENCE,
             # --- Task-specific optimizer / augmentation / loss block ---
             **extra,
         )
@@ -1290,20 +1310,21 @@ def train_models():
                         )
 
     # ---- primary detectors (unchanged) ---------------------------------
-    if params["use_local_static_model"]:
-        print("Training primary static model")
-        if params["primary_static_classes"][0] != "0":
-            maybe_retrain(
-                "models/model_primary_static",
-                params["primary_static_yaml_path"],
-                params["primary_static_project_path"],
-                params["primary_static_model_path"],
-                params["primary_classifier"],
-                params["primary_epochs"],
-                params["primary_imgsz"],
-                task="detect",
-            )
+    # Primary static
+    if params["use_local_static_model"] and params["primary_static_classes"][0] != "0":
+        maybe_retrain(
+            "models/model_primary_static",
+            params["primary_static_yaml_path"],
+            params["primary_static_project_path"],
+            params["primary_static_model_path"],
+            params["primary_classifier"],
+            params["primary_epochs"],
+            params["primary_imgsz"],
+            task="detect",
+            stream="static",  # <-- added
+        )
 
+    # Primary motion
     if params["primary_motion_classes"][0] != "0":
         maybe_retrain(
             "models/model_primary_motion",
@@ -1314,6 +1335,7 @@ def train_models():
             params["primary_epochs"],
             params["primary_imgsz"],
             task="detect",
+            stream="motion",  # <-- added
         )
 
 

@@ -83,6 +83,13 @@ class BoxMOTTracker:
         else:
             self._emulate_min_hits = True
 
+        print(
+            f"[tracker] applied: det_thresh={self._tracker.det_thresh}, "
+            f"max_age={self._tracker.max_age}, "
+            f"min_hits={getattr(self._tracker, 'min_hits', '?')}, "
+            f"iou_threshold={getattr(self._tracker, 'iou_threshold', '?')}"
+        )
+
     # ---- Helpers for class name ↔ index ----
     def _cls_idx(self, name):
         if name is None:
