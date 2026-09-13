@@ -19,7 +19,7 @@ class BoxMOTTracker:
         iou_threshold=0.2,
         velocity_window=5,
         asso_func="giou",
-        delta_t=3,
+        delta_t=5,
         device="cpu",  # restored
         half=False,  # restored
         reid_weights=None,
@@ -42,6 +42,7 @@ class BoxMOTTracker:
             "iou_threshold": iou_threshold,
             "max_age": max_age,
             "min_hits": min_hits,
+            "max_obs": max_age + delta_t,
         }
         options = tuple(sorted(opts.items()))
 
