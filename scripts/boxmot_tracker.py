@@ -3,26 +3,11 @@ from collections import deque
 from pathlib import Path
 
 # Use BoxMOT's official factory builder to remove manual class parsing boilerplate
-from boxmot.trackers.registry import create_tracker
+from boxmot import create_tracker
+from boxmot.trackers import TrackerSpec
 
 
 class BoxMOTTracker:
-    """
-    Wraps any BoxMOT tracker behind the interface expected by classify_track.py.
-
-    Usage:
-        tracker = BoxMOTTracker(
-            tracker_type='ocsort',
-            class_names=['fish'],
-            frame_rate=fps / (frame_skip + 1),
-            det_thresh=0.25,
-            max_age=45,
-            min_hits=3,
-            iou_threshold=0.2
-        )
-        assignment = tracker.update(detections, frame)
-    """
-
     def __init__(
         self,
         tracker_type="ocsort",
@@ -32,10 +17,12 @@ class BoxMOTTracker:
         max_age=45,
         min_hits=3,
         iou_threshold=0.2,
-        device="cpu",
-        half=False,
-        reid_weights="osnet_x0_25_msmt17.pt",
         velocity_window=5,
+        asso_func="giou",
+        delta_t=3,
+        device="cpu",  # restored
+        half=False,  # restored
+        reid_weights=None,
     ):
         self.tracker_type = tracker_type.lower()
         self.class_names = list(class_names) if class_names else []
@@ -43,51 +30,57 @@ class BoxMOTTracker:
         self.velocity_window = max(2, int(velocity_window))
         self.max_age = max_age
         self.min_hits = min_hits
-        self._history = {}  # tid -> deque of (frame, cx, cy)
-        self.tracks = {}  # tid -> track info dict
+        self._history = {}
+        self.tracks = {}
         self._frame_idx = 0
+        self._emulate_min_hits = False
 
-        # Create the tracker instance securely using BoxMOT's factory framework
-        # If your tracker is motion-only, reid_weights will safely ignore itself
+        opts = {
+            "asso_func": asso_func,
+            "delta_t": delta_t,
+            "det_thresh": det_thresh,
+            "iou_threshold": iou_threshold,
+            "max_age": max_age,
+            "min_hits": min_hits,
+        }
+        options = tuple(sorted(opts.items()))
+
         self._tracker = create_tracker(
-            tracker_type=self.tracker_type,
-            reid_weights=Path(reid_weights) if reid_weights else None,
-            device=device,
-            half=half,
+            TrackerSpec(
+                name=self.tracker_type,
+                backend="python",
+                geometry="aabb",
+                per_class=False,
+                options=options,
+            )
         )
 
-        # Overwrite internal tracker attributes to respect your custom hyperparameter arguments
-        # Handling structural name variations between traditional trackers and ByteTrack parameters
-        if hasattr(self._tracker, "det_thresh"):
-            self._tracker.det_thresh = det_thresh
-        if hasattr(self._tracker, "iou_threshold"):
-            self._tracker.iou_threshold = iou_threshold
-        elif hasattr(self._tracker, "match_thresh"):
-            self._tracker.match_thresh = 1.0 - iou_threshold
+        # device/half/reid_weights only mean anything for ReID-capable trackers.
+        # For ocsort/bytetrack this block is skipped entirely — nothing to configure.
+        if reid_weights is not None:
+            from boxmot.reid import ReIDEncoderSpec
 
-        # Handle max_age and track frames constraints
-        if self.tracker_type == "bytetrack" and hasattr(self._tracker, "track_buffer"):
-            if frame_rate > 0:
-                self._tracker.track_buffer = max(
-                    1, int(round(max_age * 30.0 / float(frame_rate)))
+            if (
+                not isinstance(self._tracker, ReIDEncoderSpec)
+                or not self._tracker.generates_embeddings
+            ):
+                print(
+                    f"[tracker] '{self.tracker_type}' has no ReID backend — reid_weights/device/half ignored"
                 )
             else:
-                self._tracker.track_buffer = max_age
-        elif hasattr(self._tracker, "max_age"):
-            self._tracker.max_age = max_age
-
-        # Dynamically determine if we need to emulate min_hits downstream
-        if hasattr(self._tracker, "min_hits"):
-            self._tracker.min_hits = min_hits
-            self._emulate_min_hits = False
-        else:
-            self._emulate_min_hits = True
+                self._tracker.configure_reid(
+                    ReIDEncoderSpec(
+                        backend="pytorch",
+                        artifact=str(reid_weights),
+                        device=device,
+                        precision="fp16" if half else "fp32",
+                    )
+                )
 
         print(
-            f"[tracker] applied: det_thresh={self._tracker.det_thresh}, "
-            f"max_age={self._tracker.max_age}, "
-            f"min_hits={getattr(self._tracker, 'min_hits', '?')}, "
-            f"iou_threshold={getattr(self._tracker, 'iou_threshold', '?')}"
+            f"[tracker] created '{self.tracker_type}' backend=python "
+            f"det_thresh={det_thresh} max_age={max_age} min_hits={min_hits} "
+            f"iou_threshold={iou_threshold} asso_func={asso_func} delta_t={delta_t}"
         )
 
     # ---- Helpers for class name ↔ index ----
