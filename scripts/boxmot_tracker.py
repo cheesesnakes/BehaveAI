@@ -56,28 +56,12 @@ class BoxMOTTracker:
             )
         )
 
-        # device/half/reid_weights only mean anything for ReID-capable trackers.
-        # For ocsort/bytetrack this block is skipped entirely — nothing to configure.
+        # Configure ReID AFTER the tracker has been created
         if reid_weights is not None:
-            from boxmot.reid import ReIDEncoderSpec
+            self._tracker.reid_weights = Path(reid_weights)
 
-            if (
-                not isinstance(self._tracker, ReIDEncoderSpec)
-                or not self._tracker.generates_embeddings
-            ):
-                print(
-                    f"[tracker] '{self.tracker_type}' has no ReID backend — reid_weights/device/half ignored"
-                )
-            else:
-                self._tracker.configure_reid(
-                    ReIDEncoderSpec(
-                        backend="pytorch",
-                        artifact=str(reid_weights),
-                        device=device,
-                        precision="fp16" if half else "fp32",
-                    )
-                )
-
+        if device is not None:
+            self._tracker.device = device
         print(
             f"[tracker] created '{self.tracker_type}' backend=python "
             f"det_thresh={det_thresh} max_age={max_age} min_hits={min_hits} "
