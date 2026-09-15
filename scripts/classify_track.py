@@ -68,6 +68,7 @@ Both expose the same interface:
     `tid in tracker.tracks`
 """
 
+import argparse
 import csv
 import glob
 import os
@@ -1832,7 +1833,7 @@ def build_tracker(fps):
     )
 
 
-def process_video(file):
+def process_video(file, frame_only=False):
     # ---- STAGE 2a: open inputs and outputs ----------------------------
     # Preserve any subfolder structure from input/ under output/.
     #   output/annotated_videos/<rel_dir>/<base>_detected.mp4
@@ -1854,13 +1855,16 @@ def process_video(file):
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) * params["scale_factor"])
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * params["scale_factor"])
     fps = cap.get(cv2.CAP_PROP_FPS)
-    writer = cv2.VideoWriter(
-        os.path.join(video_out_dir, base + "_detected.mp4"),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (w, h),
+    writer = (
+        None
+        if frame_only
+        else cv2.VideoWriter(
+            os.path.join(video_out_dir, base + "_detected.mp4"),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (w, h),
+        )
     )
-
     # Crop margin for the secondary classifiers. Must match whatever was used
     # to generate the training crops — see expand_and_clamp_box().
     crop_margin = float(params.get("secondary_crop_margin", 0.0))
@@ -1914,7 +1918,8 @@ def process_video(file):
     if model_static is None and model_motion is None:
         print(f"Skipping {file}: no trained primary models available")
         cap.release()
-        writer.release()
+        if writer is not None:
+            writer.release()
         try:
             os.remove(os.path.join(video_out_dir, base + "_detected.mp4"))
         except OSError:
@@ -2512,7 +2517,8 @@ def process_video(file):
             )
 
             # write the annotated frame to the output video
-            writer.write(frame)
+            if writer is not None:
+                writer.write(frame)
 
             # ---- 5d-bis: save one annotated frame per newly-seen ID ---
             # Done *after* all drawing + HUD so the exported frame is the
@@ -2549,7 +2555,8 @@ def process_video(file):
 
     # ---- STAGE 5e: close outputs -------------------------------------
     cap.release()
-    writer.release()
+    if writer is not None:
+        writer.release()
     csv_file.close()
 
     data = pd.read_csv(os.path.join(video_out_dir, base + "_tracking.csv"))
@@ -2566,6 +2573,21 @@ def process_video(file):
 # Train (or verify) models once, then batch-process every file in input/.
 # ============================================================================
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Train/verify models, then batch-classify and track every "
+        "video in the project's input/ folder."
+    )
+    parser.add_argument("project")
+    parser.add_argument(
+        "--frame-only",
+        action="store_true",
+        help=(
+            "Do not write the annotated MP4 (annotated_videos/<name>_detected.mp4). "
+            "Still writes the per-track JPEG snapshots (annotated_frames/) and the "
+            "tracking CSV. Saves a large amount of disk and some encoding time."
+        ),
+    )
+    args = parser.parse_args()
     train_models()
 
     input_root = params["input_folder"]
@@ -2581,6 +2603,12 @@ if __name__ == "__main__":
         ".mpeg",
     }
 
+    if args.frame_only:
+        print(
+            "Running in --frame-only mode: no annotated MP4 will be written; "
+            "annotated_frames/ and the tracking CSV are still produced."
+        )
+
     data = pd.DataFrame()
 
     for vid in sorted(glob.glob(os.path.join(input_root, "**", "*"), recursive=True)):
@@ -2588,7 +2616,7 @@ if __name__ == "__main__":
             continue
         if os.path.splitext(vid)[1].lower() not in video_exts:
             continue
-        temp = process_video(vid)
+        temp = process_video(vid, frame_only=args.frame_only)
 
         # process_video returns None when a video is skipped (no models, or
         # the file would not open). Guard before touching the frame.
