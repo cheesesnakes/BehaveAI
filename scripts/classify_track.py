@@ -1844,7 +1844,9 @@ def process_video(file, frame_only=False):
     base = os.path.splitext(os.path.basename(rel))[0]
 
     video_out_dir = os.path.join(params["output_folder"], "annotated_videos", rel_dir)
-    frames_out_dir = os.path.join(params["output_folder"], "annotated_frames", rel_dir)
+    frames_out_dir = os.path.join(
+        params["output_folder"], "annotated_frames", rel_dir, base
+    )
     os.makedirs(video_out_dir, exist_ok=True)
     os.makedirs(frames_out_dir, exist_ok=True)
 
