@@ -2564,7 +2564,7 @@ def process_video(file, frame_only=False):
     n_tracks = data["id"].nunique() if len(data) else 0
     print(f"Done processing {base} | {current_fps:.1f} FPS | {n_tracks} tracks")
 
-    return data
+    return 0
 
 
 # ============================================================================
@@ -2609,26 +2609,9 @@ if __name__ == "__main__":
             "annotated_frames/ and the tracking CSV are still produced."
         )
 
-    data = pd.DataFrame()
-
     for vid in sorted(glob.glob(os.path.join(input_root, "**", "*"), recursive=True)):
         if not os.path.isfile(vid):
             continue
         if os.path.splitext(vid)[1].lower() not in video_exts:
             continue
-        temp = process_video(vid, frame_only=args.frame_only)
-
-        # process_video returns None when a video is skipped (no models, or
-        # the file would not open). Guard before touching the frame.
-        if temp is None or len(temp) == 0:
-            continue
-
-        temp["video"] = os.path.relpath(vid, input_root)
-        data = pd.concat([data, temp], ignore_index=True)
-
-    if len(data):
-        data.to_csv(
-            os.path.join(params["output_folder"], "tracking_data.csv"), index=False
-        )
-    else:
-        print("No tracking data produced.")
+        process_video(vid, frame_only=args.frame_only)
