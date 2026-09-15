@@ -1970,10 +1970,8 @@ def process_video(file, frame_only=False):
             "primary_static_conf",
             "primary_motion_class",
             "primary_motion_conf",
-            "secondary_static_class",
-            "secondary_static_conf",
-            "secondary_motion_class",
-            "secondary_motion_conf",
+            "secondary_static_topk",
+            "secondary_motion_topk",
         ]
     )
 
@@ -2220,36 +2218,64 @@ def process_video(file, frame_only=False):
                     static_crop = crop_region(frame, crop_box)
                     motion_crop = crop_region(motion_image, crop_box)
 
+                    def _format_topk(names, indices, confs):
+                        """Build '{classA:0.823,classB:0.101,...}' from parallel index/conf lists."""
+                        parts = [
+                            f"{names[int(idx)]}:{float(c):.3f}"
+                            for idx, c in zip(indices, confs)
+                            if idx is not None and idx >= 0
+                        ]
+                        return "{" + ",".join(parts) + "}"
+
                     def _run(model_dict, crop):
                         if model_dict is None or crop is None or crop.size == 0:
-                            return None, None
+                            return None, None, ""
                         if not isinstance(model_dict, dict):
                             m = model_dict
                         else:
                             m = model_dict.get(primary_class)
                         if m is None:
-                            return None, None
+                            return None, None, ""
                         res = m.predict(
                             crop,
                             imgsz=params["secondary_imgsz"],
                             verbose=False,
                         )
                         if res[0].probs is None:
-                            return None, None
-                        conf = res[0].probs.top1conf.item()
-                        # Below the threshold the top-1 label is noise. Returning it
-                        # anyway is how a single track ends up cycling through four
-                        # species across four consecutive frames.
+                            return None, None, ""
+
+                        probs = res[0].probs
+                        conf = probs.top1conf.item()
+
+                        # Full distribution (up to 5 classes), independent of the threshold below —
+                        # this is what should land in the CSV instead of a single winner.
+                        topk_str = _format_topk(
+                            m.names, probs.top5, probs.top5conf.tolist()
+                        )
+
+                        # Below the threshold the top-1 label is still noise for the single-label
+                        # columns, but the distribution itself is still informative — return it.
                         if conf < params["secondary_conf_thresh"]:
-                            return None, None
-                        return m.names[res[0].probs.top1], conf
+                            return None, None, topk_str
+                        return m.names[probs.top1], conf, topk_str
+
+                    def _format_topk_from_pairs(pairs):
+                        """pairs: iterable of (name, conf). Builds '{classA:0.823,classB:0.101,...}'."""
+                        return (
+                            "{"
+                            + ",".join(
+                                f"{name}:{float(conf):.3f}" for name, conf in pairs
+                            )
+                            + "}"
+                        )
 
                     # Static secondary — only if configured
                     if len(params["secondary_static_classes"]) >= 2:
-                        cls, conf = _run(secondary_static_models, static_crop)
+                        cls, conf, topk = _run(secondary_static_models, static_crop)
                         if cls is not None:
                             det["secondary_static_class"] = cls
                             det["secondary_static_conf"] = conf
+                        det["secondary_static_topk"] = topk
                     # External static secondary — needs a static_crop
                     elif (
                         params["secondary_static_external_model"] != ""
@@ -2265,13 +2291,36 @@ def process_video(file, frame_only=False):
                             det["secondary_static_class"] = cls
                             det["secondary_static_conf"] = conf
 
+                        # NOTE: I don't have visibility into FishInferenceEngine's API, so this
+                        # tries the plausible attribute names for a ranked prediction list and
+                        # falls back to just `best` if none exist. Confirm the real attribute
+                        # (likely something like res.predictions / res.classifications /
+                        # res.results) and simplify this to a single branch once you know it.
+                        ranked = (
+                            getattr(res, "predictions", None)
+                            or getattr(res, "classifications", None)
+                            or getattr(res, "results", None)
+                            or getattr(res, "top_k", None)
+                        )
+                        if ranked:
+                            pairs = [(p.name, p.accuracy) for p in ranked[:5]]
+                            det["secondary_static_topk"] = _format_topk_from_pairs(
+                                pairs
+                            )
+                        else:
+                            # Only a single best prediction is available from this engine.
+                            det["secondary_static_topk"] = (
+                                _format_topk_from_pairs([(cls, conf)])
+                                if cls is not None
+                                else ""
+                            )
                     # Motion secondary — needs a motion_image
                     if len(params["secondary_motion_classes"]) >= 2:
-                        cls, conf = _run(secondary_motion_models, motion_crop)
+                        cls, conf, topk = _run(secondary_motion_models, motion_crop)
                         if cls is not None:
                             det["secondary_motion_class"] = cls
                             det["secondary_motion_conf"] = conf
-
+                        det["secondary_motion_topk"] = topk
                 processed_detections.append(det)
 
             # ================================================================
@@ -2318,10 +2367,10 @@ def process_video(file, frame_only=False):
                 pm_class = det.get("primary_motion_class", "")
                 pm_conf = det.get("primary_motion_conf", 0)
                 ss_class = det.get("secondary_static_class", "")
-                ss_conf = det.get("secondary_static_conf", 0)
                 sm_class = det.get("secondary_motion_class", "")
-                sm_conf = det.get("secondary_motion_conf", 0)
                 p_source = det.get("source", "")
+                ss_topk = det.get("secondary_static_topk", "")
+                sm_topk = det.get("secondary_motion_topk", "")
 
                 # Label text uses whichever stream produced this detection.
                 label_parts = []
@@ -2464,6 +2513,7 @@ def process_video(file, frame_only=False):
                 )
 
                 # ---- 5c: CSV row ---------------------------------------
+
                 csv_writer.writerow(
                     [
                         frame_idx,
@@ -2479,10 +2529,8 @@ def process_video(file, frame_only=False):
                         f"{ps_conf:.3f}",
                         pm_class,
                         f"{pm_conf:.3f}",
-                        ss_class,
-                        f"{ss_conf:.3f}",
-                        sm_class,
-                        f"{sm_conf:.3f}",
+                        ss_topk,
+                        sm_topk,
                     ]
                 )
 
