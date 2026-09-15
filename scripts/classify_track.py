@@ -2480,37 +2480,13 @@ def process_video(file, frame_only=False):
                     # Flat mode — single box, primary label only.
                     _make_label(f"{tid} {primary_cls}")
 
-                # ---- 5b: draw the motion vector ------------------------
+                # ---- 5b: get motion vector ------------------------
                 # Both backends expose state(tid) -> (x, y, vx, vy), so this
                 # no longer reaches into a backend-specific Kalman filter.
                 st = tracker.state(tid)
                 if st is None:
                     st = (float(cx), float(cy), 0.0, 0.0)
                 sx, sy, vx, vy = st
-                next_x, next_y = sx + vx, sy + vy
-
-                light_color = tuple(int(0.8 * ch + 0.2 * 255) for ch in primary_col)
-                cv2.line(
-                    frame,
-                    (int(sx), int(sy)),
-                    (int(next_x), int(next_y)),
-                    primary_col,
-                    params["line_thickness"],
-                )
-                cv2.circle(
-                    frame,
-                    (int(next_x), int(next_y)),
-                    3,
-                    light_color,
-                    -params["line_thickness"],
-                )
-                cv2.circle(
-                    frame,
-                    (int(cx), int(cy)),
-                    3,
-                    primary_col,
-                    -params["line_thickness"],
-                )
 
                 # ---- 5c: CSV row ---------------------------------------
 
