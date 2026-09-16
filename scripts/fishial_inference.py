@@ -75,7 +75,7 @@ RETURN_EMBEDDING = False
 K_CENTERS = 3  # for ArcFace scoring
 
 # Preprocessing defaults
-DEFAULT_INPUT_SIZE = (154, 434)  # (H, W)
+DEFAULT_INPUT_SIZE = (224, 224)  # (H, W)
 
 # Inference Engine
 

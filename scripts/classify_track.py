@@ -2284,7 +2284,9 @@ def process_video(file, frame_only=False):
                         and static_crop is not None
                         and static_crop.size > 0
                     ):
-                        res = secondary_static_models.predict_single(static_crop)
+                        res = secondary_static_models.predict_single(
+                            raw_frame, bbox=crop_box, poly=None
+                        )
                         best_prediction = res.best
                         cls = best_prediction.name
                         conf = best_prediction.accuracy
